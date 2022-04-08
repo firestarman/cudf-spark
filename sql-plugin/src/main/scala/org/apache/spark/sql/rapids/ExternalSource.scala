@@ -41,33 +41,43 @@ object ExternalSource {
   }
 
   def tagSupportForGpuFileSourceScanExec(meta: SparkPlanMeta[FileSourceScanExec]): Unit = {
-    if (hasSparkAvroJar) {
-      meta.wrapped.relation.fileFormat match {
-        case _: AvroFileFormat => GpuReadAvroFileFormat.tagSupport(meta)
-        case f =>
-          meta.willNotWorkOnGpu(s"unsupported file format: ${f.getClass.getCanonicalName}")
-      }
-    } else {
-      meta.wrapped.relation.fileFormat match {
-        case f =>
-          meta.willNotWorkOnGpu(s"unsupported file format: ${f.getClass.getCanonicalName}")
-      }
+    meta.wrapped.relation.fileFormat match {
+      case _: AvroFileFormat if hasSparkAvroJar => GpuReadAvroFileFormat.tagSupport(meta)
+      case f =>
+        meta.willNotWorkOnGpu(s"unsupported file format: ${f.getClass.getCanonicalName}")
     }
   }
 
   def convertFileFormatForGpuFileSourceScanExec(format: FileFormat): FileFormat = {
-    if (hasSparkAvroJar) {
-      format match {
-        case _: AvroFileFormat => new GpuReadAvroFileFormat
-        case f =>
-          throw new IllegalArgumentException(s"${f.getClass.getCanonicalName} is not supported")
-      }
-    } else {
-      format match {
-        case f =>
-          throw new IllegalArgumentException(s"${f.getClass.getCanonicalName} is not supported")
-      }
+    format match {
+      case _: AvroFileFormat if hasSparkAvroJar => new GpuReadAvroFileFormat
+      case f =>
+        throw new IllegalArgumentException(s"${f.getClass.getCanonicalName} is not supported")
     }
+  }
+
+  def createMultiFileFactoryForGpuFileSourceScanExec(
+      format: FileFormat,
+      broadcastedConf: Broadcast[SerializableConfiguration],
+      pushedFilters: Array[Filter]
+      fileScan: GpuFileSourceScanExec): FileFormat = {
+    format match {
+      case _: AvroFileFormat if hasSparkAvroJar =>
+        GpuOrcMultiFilePartitionReaderFactory(
+          fileScan.relation.sparkSession.sessionState.conf,
+          broadcastedConf,
+          fileScan.relation.dataSchema,
+          fileScan.requiredSchema,
+          fileScan.relation.partitionSchema,
+          pushedFilters,
+          fileScan.rapidsConf,
+          fileScan.allMetrics,
+          fileScan.queryUsesInputFile)
+      case _ =>
+        // never reach here
+        throw new RuntimeException(s"File format $format is not supported yet")
+    }
+
   }
 
   def getScans: Map[Class[_ <: Scan], ScanRule[_ <: Scan]] = {
@@ -85,6 +95,7 @@ object ExternalSource {
                 a.readDataSchema,
                 a.readPartitionSchema,
                 a.options,
+                a.pushedFilters,
                 conf,
                 a.partitionFilters,
                 a.dataFilters)

@@ -130,7 +130,7 @@ class DeviceMemoryEventHandler(
         val retryState = oomRetryState.get()
         retryState.resetIfNeeded(retryCount, storeSpillableSize)
 
-        logInfo(s"Device allocation of $allocSize bytes failed, device store has " +
+        println(s"->Device allocation of $allocSize bytes failed, device store has " +
           s"$storeSize total and $storeSpillableSize spillable bytes. $attemptMsg" +
           s"Total RMM allocated is ${Rmm.getTotalBytesAllocated} bytes. ")
         if (storeSpillableSize == 0) {
@@ -165,7 +165,8 @@ class DeviceMemoryEventHandler(
               TrampolineUtil.incTaskMetricsMemoryBytesSpilled(amountSpilled)
             }
           }
-          true
+          // Retry allocation only when some buffers spill out or other tasks do spilling.
+          maybeAmountSpilled.forall(_ > 0)
         }
       }
     } catch {

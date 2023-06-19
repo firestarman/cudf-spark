@@ -27,7 +27,7 @@ import com.nvidia.spark.rapids.StorageTier.StorageTier
 import com.nvidia.spark.rapids.format.TableMeta
 import com.nvidia.spark.rapids.jni.RmmSpark
 
-import org.apache.spark.{SparkConf, SparkEnv}
+import org.apache.spark.{SparkConf, SparkEnv, TaskContext}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.rapids.{RapidsDiskBlockManager, TempSpillBufferId}
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
@@ -527,8 +527,15 @@ class RapidsBufferCatalog(
               val nextSpillable = store.nextSpillable()
               if (nextSpillable != null) {
                 // we have a buffer (nextSpillable) to spill
-                spillAndFreeBuffer(nextSpillable, spillStore, stream)
-                totalSpilled += nextSpillable.getMemoryUsedBytes
+                try {
+                  spillAndFreeBuffer(nextSpillable, spillStore, stream)
+                  totalSpilled += nextSpillable.getMemoryUsedBytes
+                } catch {
+                  case oom : OutOfMemoryError =>
+                    exhausted = true
+                    // Host only spilling failed due to OOM, will retry with spilling to disk
+                    logWarning(oom.getMessage)
+                }
               }
             } else {
               rmmShouldRetryAlloc = true
@@ -589,6 +596,13 @@ class RapidsBufferCatalog(
     }
   }
 
+  private def allowSpillingToDisk: Boolean = {
+    // If it is from a throw_split state, we allow spilling to disk.
+    val ret = RmmSpark.isFromThrowSplit()
+    println(s"-> allow spilling to disk $ret")
+    ret
+  }
+
   /**
    * If `spillStore` defines a maximum size, spill to make room for `buffer`.
    */
@@ -598,6 +612,18 @@ class RapidsBufferCatalog(
       stream: Cuda.Stream): Unit = {
     val spillStoreMaxSize = spillStore.getMaxSize
     if (spillStoreMaxSize.isDefined) {
+      // Now only host memory store has a max limitation, and will spill its buffers to disk,
+      // Only spill to disk if allowed.
+      println(s"->allow task ${TaskContext.get.taskAttemptId()} spilling " +
+        s"to disk? $allowSpillingToDisk")
+      if (!allowSpillingToDisk) {
+        if (spillStore.currentSize + buffer.getMemoryUsedBytes > spillStoreMaxSize.get) {
+          throw new OutOfMemoryError(s"HostMemoryStore OOM, max size ${spillStoreMaxSize.get}")
+        } else {
+          return
+        }
+      }
+
       // this spillStore has a maximum size requirement (host only). We need to spill from it
       // in order to make room for `buffer`.
       val targetTotalSize =

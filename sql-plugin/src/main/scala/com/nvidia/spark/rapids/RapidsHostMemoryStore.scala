@@ -147,3 +147,5 @@ class RapidsHostMemoryStore(
     override def getMemoryUsedBytes: Long = size
   }
 }
+
+class ExceedHostMaxSizeException(message: String) extends RuntimeException(message)

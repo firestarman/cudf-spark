@@ -531,10 +531,10 @@ class RapidsBufferCatalog(
                   spillAndFreeBuffer(nextSpillable, spillStore, stream)
                   totalSpilled += nextSpillable.getMemoryUsedBytes
                 } catch {
-                  case oom : OutOfMemoryError =>
+                  case ex : ExceedHostMaxSizeException =>
                     exhausted = true
                     // Host only spilling failed due to OOM, will retry with spilling to disk
-                    logWarning(oom.getMessage)
+                    logWarning(ex.toString)
                 }
               }
             } else {
@@ -618,7 +618,8 @@ class RapidsBufferCatalog(
         s"to disk? $allowSpillingToDisk")
       if (!allowSpillingToDisk) {
         if (spillStore.currentSize + buffer.getMemoryUsedBytes > spillStoreMaxSize.get) {
-          throw new OutOfMemoryError(s"HostMemoryStore OOM, max size ${spillStoreMaxSize.get}")
+          throw new ExceedHostMaxSizeException(s"Go beyond the HostMemoryStore " +
+            s"max size: ${spillStoreMaxSize.get}")
         } else {
           return
         }

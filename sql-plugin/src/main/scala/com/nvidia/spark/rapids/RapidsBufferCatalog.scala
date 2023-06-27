@@ -599,7 +599,8 @@ class RapidsBufferCatalog(
   private def allowSpillingToDisk: Boolean = {
     // If it is from a throw_split state, we allow spilling to disk.
     val ret = RmmSpark.isFromThrowSplit()
-    println(s"-> allow spilling to disk $ret")
+    println(s"->allow task ${TaskContext.get.taskAttemptId()} spilling " +
+      s"to disk? $ret")
     ret
   }
 
@@ -614,26 +615,22 @@ class RapidsBufferCatalog(
     if (spillStoreMaxSize.isDefined) {
       // Now only host memory store has a max limitation, and will spill its buffers to disk,
       // Only spill to disk if allowed.
-      println(s"->allow task ${TaskContext.get.taskAttemptId()} spilling " +
-        s"to disk? $allowSpillingToDisk")
       if (!allowSpillingToDisk) {
         if (spillStore.currentSize + buffer.getMemoryUsedBytes > spillStoreMaxSize.get) {
           throw new ExceedHostMaxSizeException(s"Go beyond the HostMemoryStore " +
             s"max size: ${spillStoreMaxSize.get}")
-        } else {
-          return
         }
-      }
-
-      // this spillStore has a maximum size requirement (host only). We need to spill from it
-      // in order to make room for `buffer`.
-      val targetTotalSize =
-        math.max(spillStoreMaxSize.get - buffer.getMemoryUsedBytes, 0)
-      val maybeAmountSpilled = synchronousSpill(spillStore, targetTotalSize, stream)
-      maybeAmountSpilled.foreach { amountSpilled =>
-        if (amountSpilled != 0) {
-          logInfo(s"Spilled $amountSpilled bytes from the ${spillStore.name} store")
-          TrampolineUtil.incTaskMetricsDiskBytesSpilled(amountSpilled)
+      } else {
+        // this spillStore has a maximum size requirement (host only). We need to spill from it
+        // in order to make room for `buffer`.
+        val targetTotalSize =
+          math.max(spillStoreMaxSize.get - buffer.getMemoryUsedBytes, 0)
+        val maybeAmountSpilled = synchronousSpill(spillStore, targetTotalSize, stream)
+        maybeAmountSpilled.foreach { amountSpilled =>
+          if (amountSpilled != 0) {
+            logInfo(s"Spilled $amountSpilled bytes from the ${spillStore.name} store")
+            TrampolineUtil.incTaskMetricsDiskBytesSpilled(amountSpilled)
+          }
         }
       }
     }

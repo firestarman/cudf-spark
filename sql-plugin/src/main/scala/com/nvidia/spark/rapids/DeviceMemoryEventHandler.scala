@@ -155,10 +155,11 @@ class DeviceMemoryEventHandler(
         } else {
           val targetSize = Math.max(storeSpillableSize - allocSize, 0)
           logDebug(s"Targeting device store size of $targetSize bytes")
+          println(s"->Targeting device store size of $targetSize bytes")
           val maybeAmountSpilled =
             catalog.synchronousSpill(store, targetSize, Cuda.DEFAULT_STREAM)
           maybeAmountSpilled.foreach { amountSpilled =>
-            logInfo(s"Spilled $amountSpilled bytes from the device store")
+            println(s"Spilled $amountSpilled bytes from the device store")
             if (isGdsSpillEnabled) {
               TrampolineUtil.incTaskMetricsDiskBytesSpilled(amountSpilled)
             } else {

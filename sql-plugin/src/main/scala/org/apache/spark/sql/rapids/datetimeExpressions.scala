@@ -998,7 +998,7 @@ case class GpuGetTimestamp(
   override def right: Expression = format
 }
 
-class FromUnitTimeMeta(a: FromUnixTime,
+class FromUnixTimeMeta(a: FromUnixTime,
     override val conf: RapidsConf,
     val p: Option[RapidsMeta[_, _, _]],
     r: DataFromReplacementRule

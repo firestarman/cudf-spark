@@ -4513,8 +4513,9 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
 
   private def lookAtReusedExchange(sparkPlan: SparkPlan): Unit = {
     val exchanges = mutable.Map.empty[SparkPlan, Exchange]
+    println(s"==>REUSED_EX_DEBUG: reuse exchange enabled ?= ${conf.exchangeReuseEnabled}")
     sparkPlan.foreach {
-      case exchange: Exchange if conf.exchangeReuseEnabled =>
+      case exchange: Exchange =>
         val cachedExchange = exchanges.getOrElseUpdate(exchange.canonicalized, exchange)
         if (cachedExchange.ne(exchange)) {
           println(
@@ -4527,19 +4528,29 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
             """.stripMargin)
         } else {
           if (exchanges.size > 1) {
-            println(
-              s"""==>REUSED_EX_DEBUG: found maybe a different exchange:
-                 |   $cachedExchange
-                 |   (Canonicalized: ${cachedExchange.canonicalized})
-              """.stripMargin)
-            println(
-              s"""==>REUSED_EX_DEBUG: current map:
-                |    $exchanges
-                |""".stripMargin)
+            // found maybe a different exchange. For this case, we only care about the
+            // 4 leaf ones.
+            if (cachedExchange.child.find(f=>f.isInstanceOf[Exchange]).isDefined) {
+              println("==>REUSED_EX_DEBUG: ignore this exchange, it is not the leaf one")
+            } else {
+              println(
+                s"""==>REUSED_EX_DEBUG: found maybe a different exchange:
+                   |   $cachedExchange
+                   |   (Canonicalized: ${cachedExchange.canonicalized})
+                """.stripMargin)
+            }
           } else {
             // the first one
           }
         }
+      case re: ReusedExchangeExec =>
+        println(s"==>REUSED_EX_DEBUG: catch a ReusedExchangeExec, its child is: ")
+        println(
+          s"""
+            |    ${re.child}
+            |  ===> child canonicalized
+            |    ${re.child.canonicalized}
+            |""".stripMargin)
       case _ => // ignore
     }
   }
@@ -4558,6 +4569,7 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
           logWarning(s"${logPrefix}Transformed query:" +
             s"\nOriginal Plan:\n$plan\nTransformed Plan:\n$updatedPlan")
         }
+        println("==>REUSED_EX_DEBUG: Start to look at reused exchange...")
         lookAtReusedExchange(updatedPlan)
         updatedPlan
       }

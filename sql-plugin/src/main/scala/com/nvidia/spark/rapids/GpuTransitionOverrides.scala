@@ -36,7 +36,7 @@ import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2ScanExecBase, 
 import org.apache.spark.sql.execution.exchange.{BroadcastExchangeLike, Exchange, ReusedExchangeExec, ShuffleExchangeLike}
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec, HashedRelationBroadcastMode}
 import org.apache.spark.sql.rapids.{GpuDataSourceScanExec, GpuFileSourceScanExec, GpuShuffleEnv, GpuTaskMetrics}
-import org.apache.spark.sql.rapids.execution.{ExchangeMappingCache, GpuBroadcastExchangeExec, GpuBroadcastExchangeExecBase, GpuBroadcastToRowExec, GpuCustomShuffleReaderExec, GpuHashJoin, GpuShuffleExchangeExecBase}
+import org.apache.spark.sql.rapids.execution.{GpuBroadcastExchangeExec, GpuBroadcastExchangeExecBase, GpuBroadcastToRowExec, GpuCustomShuffleReaderExec, GpuHashJoin, GpuShuffleExchangeExecBase}
 import org.apache.spark.sql.types.StructType
 
 /**
@@ -668,7 +668,8 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
   /** Mark nodes as GPU planning completed. */
   private def markGpuPlanningComplete(plan: SparkPlan): SparkPlan = {
     plan.foreach {
-      case g: GpuBroadcastExchangeExec => g.markGpuPlanningComplete()
+      // Only GpuBroadcastExchangeExec and GpuShuffleExchangedExec support SupportPlanningMark
+      case g: SupportPlanningMark => g.markGpuPlanningComplete()
       case _ =>
     }
     plan
@@ -676,14 +677,15 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
 
   /**
    * On some Spark platforms, AQE planning ends up not reusing as many GPU exchanges as possible.
-   * This searches the plan for any GPU broadcast exchanges and checks if their original CPU plans
-   * match any other previously seen GPU broadcasts with the same CPU plan.
+   * This searches the plan for any GPU broadcast/shuffle exchanges and checks if their original
+   * CPU plans match any other previously seen GPU broadcasts with the same CPU plan.
    */
   private def fixupAdaptiveExchangeReuse(p: SparkPlan): SparkPlan = {
     def doFixup(plan: SparkPlan): SparkPlan = {
       plan.transformUp {
-        case g: GpuBroadcastExchangeExec =>
-          ExchangeMappingCache.findGpuExchangeReplacement(g.cpuCanonical).map { other =>
+        // Only GpuBroadcastExchangeExec and GpuShuffleExchangedExec support SupportPlanningMark
+        case g: SupportPlanningMark if g.cpuCanonicalExec.isDefined =>
+          ExchangeMappingCache.findGpuExchangeReplacement(g.cpuCanonicalExec.get).map { other =>
             if (other eq g) {
               g
             } else {

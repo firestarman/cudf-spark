@@ -26,18 +26,19 @@ import com.nvidia.spark.rapids.GpuPartitioning
 import org.apache.spark.sql.catalyst.plans.logical.Statistics
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.execution.exchange.{ShuffleExchangeLike, ShuffleOrigin}
+import org.apache.spark.sql.execution.exchange.{Exchange, ShuffleExchangeLike, ShuffleOrigin}
 import org.apache.spark.sql.rapids.execution.GpuShuffleExchangeExecBaseWithMetrics
 
 abstract class GpuDatabricksShuffleExchangeExecBase(
     gpuOutputPartitioning: GpuPartitioning,
     child: SparkPlan,
     shuffleOrigin: ShuffleOrigin)(
-    cpuOutputPartitioning: Partitioning)
+    cpuOutputPartitioning: Partitioning,
+    override val cpuCanonicalExec: Option[Exchange])
   extends GpuShuffleExchangeExecBaseWithMetrics(gpuOutputPartitioning, child)
       with ShuffleExchangeLike {
 
-  override def otherCopyArgs: Seq[AnyRef] = cpuOutputPartitioning :: Nil
+  override def otherCopyArgs: Seq[AnyRef] = Seq(cpuOutputPartitioning, cpuCanonicalExec)
 
   override val outputPartitioning: Partitioning = cpuOutputPartitioning
 

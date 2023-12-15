@@ -65,5 +65,5 @@ class GpuShuffleMeta(
       childParts.head.convertToGpu(),
       newChild,
       shuffle.shuffleOrigin
-    )(shuffle.outputPartitioning)
+    )(shuffle.outputPartitioning, Some(shuffle.canonicalized.asInstanceOf[ShuffleExchangeExec]))
 }

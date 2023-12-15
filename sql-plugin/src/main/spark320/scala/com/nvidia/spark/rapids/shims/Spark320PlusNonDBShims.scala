@@ -57,6 +57,11 @@ trait Spark320PlusNonDBShims extends SparkShims {
       newPlan: SparkPlan): BroadcastQueryStageExec =
     BroadcastQueryStageExec(old.id, newPlan, old._canonicalized)
 
+  final def newShuffleQueryStageExec(
+      old: ShuffleQueryStageExec,
+      newPlan: SparkPlan): ShuffleQueryStageExec =
+    ShuffleQueryStageExec(old.id, newPlan, old._canonicalized)
+
   override final def filesFromFileIndex(fileIndex: PartitioningAwareFileIndex): Seq[FileStatus] = {
     fileIndex.allFiles()
   }

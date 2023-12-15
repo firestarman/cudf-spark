@@ -38,5 +38,5 @@ class GpuShuffleMeta(
       newChild,
       shuffle.shuffleOrigin,
       shuffle.advisoryPartitionSize
-    )(shuffle.outputPartitioning)
+    )(shuffle.outputPartitioning, Some(shuffle.canonicalized.asInstanceOf[ShuffleExchangeExec]))
 }

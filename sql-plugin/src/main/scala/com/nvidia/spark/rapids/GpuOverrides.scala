@@ -550,6 +550,16 @@ object GpuOverrides extends Logging {
             }.getOrElse(bqse)
           case _ => bqse
         }
+      case sqse: ShuffleQueryStageExec =>
+        sqse.plan match {
+          case ReusedExchangeExec(output, b: ShuffleExchangeExec) =>
+            val cpuCanonical = b.canonicalized.asInstanceOf[ShuffleExchangeExec]
+            val gpuExchange = ExchangeMappingCache.findGpuExchangeReplacement(cpuCanonical)
+            gpuExchange.map { g =>
+              SparkShimImpl.newShuffleQueryStageExec(sqse, ReusedExchangeExec(output, g))
+            }.getOrElse(sqse)
+          case _ => sqse
+        }
     }
   }
 

@@ -30,9 +30,10 @@ case class GpuShuffleExchangeExec(
     gpuOutputPartitioning: GpuPartitioning,
     child: SparkPlan,
     shuffleOrigin: ShuffleOrigin)(
-    cpuOutputPartitioning: Partitioning)
+    cpuOutputPartitioning: Partitioning,
+    override val cpuCanonicalExec: Option[Exchange] = None)
   extends GpuDatabricksShuffleExchangeExecBase(gpuOutputPartitioning, child, shuffleOrigin)(
-    cpuOutputPartitioning) {
+    cpuOutputPartitioning, cpuCanonicalExec) {
 
   override def getShuffleRDD(
       partitionSpecs: Array[ShufflePartitionSpec],

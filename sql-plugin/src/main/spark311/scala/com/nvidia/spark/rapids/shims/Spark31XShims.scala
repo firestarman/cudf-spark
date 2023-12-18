@@ -83,6 +83,10 @@ abstract class Spark31XShims extends Spark31Xuntil33XShims with Logging {
       old: BroadcastQueryStageExec,
       newPlan: SparkPlan): BroadcastQueryStageExec = BroadcastQueryStageExec(old.id, newPlan)
 
+  final def newShuffleQueryStageExec(
+      old: ShuffleQueryStageExec,
+      newPlan: SparkPlan): ShuffleQueryStageExec = ShuffleQueryStageExec(old.id, newPlan)
+
   override def getDateFormatter(): DateFormatter = {
     DateFormatter(DateTimeUtils.getZoneId(SQLConf.get.sessionLocalTimeZone))
   }

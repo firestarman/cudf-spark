@@ -25,16 +25,17 @@ import com.nvidia.spark.rapids.GpuPartitioning
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.{ShufflePartitionSpec, SparkPlan}
-import org.apache.spark.sql.execution.exchange.ShuffleOrigin
+import org.apache.spark.sql.execution.exchange.{Exchange, ShuffleOrigin}
 import org.apache.spark.sql.rapids.execution.ShuffledBatchRDD
 
 case class GpuShuffleExchangeExec(
     gpuOutputPartitioning: GpuPartitioning,
     child: SparkPlan,
     shuffleOrigin: ShuffleOrigin)(
-    cpuOutputPartitioning: Partitioning)
+    cpuOutputPartitioning: Partitioning,
+    override val cpuCanonicalExec: Option[Exchange] = None)
   extends GpuDatabricksShuffleExchangeExecBase(gpuOutputPartitioning,
-    child, shuffleOrigin)(cpuOutputPartitioning) {
+    child, shuffleOrigin)(cpuOutputPartitioning, cpuCanonicalExec) {
 
     override def getShuffleRDD(partitionSpecs: Array[ShufflePartitionSpec]): RDD[_] = {
         new ShuffledBatchRDD(shuffleDependencyColumnar, metrics ++ readMetrics, partitionSpecs)

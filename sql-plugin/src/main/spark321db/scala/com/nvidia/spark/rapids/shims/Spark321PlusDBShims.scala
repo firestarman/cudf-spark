@@ -76,6 +76,11 @@ trait Spark321PlusDBShims extends SparkShims
       newPlan: SparkPlan): BroadcastQueryStageExec =
     BroadcastQueryStageExec(old.id, newPlan, old.originalPlan, old.isSparkExchange)
 
+  final def newShuffleQueryStageExec(
+      old: ShuffleQueryStageExec,
+      newPlan: SparkPlan): ShuffleQueryStageExec =
+    ShuffleQueryStageExec(old.id, newPlan, old.originalPlan, old.isSparkExchange)
+
   override def filesFromFileIndex(fileCatalog: PartitioningAwareFileIndex): Seq[FileStatus] = {
     fileCatalog.allFiles().map(_.toFileStatus)
   }

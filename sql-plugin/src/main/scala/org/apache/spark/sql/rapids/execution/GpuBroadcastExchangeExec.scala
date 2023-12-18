@@ -20,9 +20,7 @@ import java.io._
 import java.util.UUID
 import java.util.concurrent._
 
-import scala.collection.mutable
 import scala.concurrent.ExecutionContext
-import scala.ref.WeakReference
 import scala.util.control.NonFatal
 
 import ai.rapids.cudf.{HostMemoryBuffer, JCudfSerialization, NvtxColor, NvtxRange}
@@ -617,53 +615,13 @@ case class GpuBroadcastExchangeExec(
     mode: BroadcastMode,
     child: SparkPlan)
     (val cpuCanonical: BroadcastExchangeExec)
-    extends GpuBroadcastExchangeExecBase(mode, child) {
+  extends GpuBroadcastExchangeExecBase(mode, child) with SupportPlanningMark {
+
+  override val cpuCanonicalExec: Option[Exchange] = Some(cpuCanonical)
+
   override def otherCopyArgs: Seq[AnyRef] = Seq(cpuCanonical)
-
-  private var _isGpuPlanningComplete = false
-
-  /**
-   * Returns true if this node and children are finished being optimized by the RAPIDS Accelerator.
-   */
-  def isGpuPlanningComplete: Boolean = _isGpuPlanningComplete
-
-  /**
-   * Method to call after all RAPIDS Accelerator optimizations have been applied
-   * to indicate this node and its children are done being planned by the RAPIDS Accelerator.
-   * Some optimizations, such as AQE exchange reuse fixup, need to know when a node will no longer
-   * be updated so it can be tracked for reuse.
-   */
-  def markGpuPlanningComplete(): Unit = {
-    if (!_isGpuPlanningComplete) {
-      _isGpuPlanningComplete = true
-      ExchangeMappingCache.trackExchangeMapping(cpuCanonical, this)
-    }
-  }
 
   override def doCanonicalize(): SparkPlan = {
     GpuBroadcastExchangeExec(mode.canonicalized, child.canonicalized)(cpuCanonical)
-  }
-}
-
-/** Caches the mappings from canonical CPU exchanges to the GPU exchanges that replaced them */
-object ExchangeMappingCache extends Logging {
-  // Cache is a mapping from CPU broadcast plan to GPU broadcast plan. The cache should not
-  // artificially hold onto unused plans, so we make both the keys and values weak. The values
-  // point to their corresponding keys, so the keys will not be collected unless the value
-  // can be collected. The values will be held during normal Catalyst planning until those
-  // plans are no longer referenced, allowing both the key and value to be reaped at that point.
-  private val cache = new mutable.WeakHashMap[Exchange, WeakReference[Exchange]]
-
-  /** Try to find a recent GPU exchange that has replaced the specified CPU canonical plan. */
-  def findGpuExchangeReplacement(cpuCanonical: Exchange): Option[Exchange] = {
-    cache.get(cpuCanonical).flatMap(_.get)
-  }
-
-  /** Add a GPU exchange to the exchange cache */
-  def trackExchangeMapping(cpuCanonical: Exchange, gpuExchange: Exchange): Unit = {
-    val old = findGpuExchangeReplacement(cpuCanonical)
-    if (!old.exists(_.asInstanceOf[GpuBroadcastExchangeExec].isGpuPlanningComplete)) {
-      cache.put(cpuCanonical, WeakReference(gpuExchange))
-    }
   }
 }

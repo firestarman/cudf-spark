@@ -694,7 +694,7 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
           }.getOrElse(g)
       }
     }
-
+    logInfo(s"==> start fixupAdaptiveExchangeReuse, input plan is: \n    $p")
     // If an exchange is at the top of the plan being remapped, this is likely due to AQE
     // re-planning, and we're not allowed to change an exchange to a reused exchange in that case.
     p match {

@@ -694,12 +694,15 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
           }.getOrElse(g)
       }
     }
-
     // If an exchange is at the top of the plan being remapped, this is likely due to AQE
     // re-planning, and we're not allowed to change an exchange to a reused exchange in that case.
     p match {
-      case e: Exchange => e.mapChildren(doFixup)
-      case _ => doFixup(p)
+      case e: Exchange =>
+        logWarning("==>REUSED_EX_DEBUG: try fix up children of an exchange")
+        e.mapChildren(doFixup)
+      case _ =>
+        logWarning(s"==>REUSED_EX_DEBUG: try to fix up a spark plan ${p.nodeName}")
+        doFixup(p)
     }
   }
 

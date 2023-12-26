@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.time.ZoneId
 
-import scala.collection.mutable
+import scala.collection.concurrent.TrieMap
 import scala.collection.mutable.ListBuffer
 import scala.reflect.ClassTag
 import scala.util.control.NonFatal
@@ -4521,46 +4521,62 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
   // gets called once for each query stage (where a query stage is an `Exchange`).
   override def apply(sparkPlan: SparkPlan): SparkPlan = applyWithContext(sparkPlan, None)
 
+  private val exchanges = TrieMap.empty[Exchange, Exchange]
+
+  private def c2s(inputPlan: SparkPlan, sb: StringBuilder, level: Int = 1): Unit = {
+    inputPlan.children.foreach { sp =>
+      sb.append("\n").append(" " * 4 * level)
+        .append(sp.productPrefix).append("canonicalized hash: ").append(sp.canonicalized.##)
+      (0 until sp.productArity).foreach { idx =>
+        sp.productElement(idx) match {
+          case _: SparkPlan =>
+            // ignore
+          case Seq(_: SparkPlan, _: SparkPlan, _@_*) =>
+            // ignore
+          case o =>
+            sb.append("\n").append(" " * 4 * (level + 1))
+              .append(o.getClass.getSimpleName).append(" hash: ").append(o.##)
+        }
+      }
+      sp.children.foreach(c2s(_, sb, level + 1))
+    }
+  }
+
+  private def e2s(ex: Exchange, logChildren: Boolean = false): String = {
+    val sb = new StringBuilder(
+      s"exchange(id: ${ex.id}, canonicalized hash: ${ex.canonicalized.##})")
+    if (logChildren) {
+      c2s(ex.child, sb)
+    }
+    sb.toString()
+  }
+
   private def lookAtReusedExchange(sparkPlan: SparkPlan): Unit = {
-    val exchanges = mutable.Map.empty[SparkPlan, Exchange]
-    logInfo(s"==>REUSED_EX_DEBUG: reuse exchange enabled ?= ${conf.exchangeReuseEnabled}")
+    logWarning(s"==>REUSED_EX_DEBUG: reuse exchange enabled ?= ${conf.exchangeReuseEnabled}")
     sparkPlan.foreach {
       case exchange: Exchange =>
-        val cachedExchange = exchanges.getOrElseUpdate(exchange.canonicalized, exchange)
+        val cachedExchange =
+          exchanges.getOrElseUpdate(exchange.canonicalized.asInstanceOf[Exchange], exchange)
         if (cachedExchange.ne(exchange)) {
-          logInfo(
-            s"""==>REUSED_EX_DEBUG: found an exchange:
-               |     $exchange
-               |     (Canonicalized: ${exchange.canonicalized})
-               |   can reuse the cached one:
-               |     $cachedExchange
-               |     (Canonicalized: ${cachedExchange.canonicalized})
-            """.stripMargin)
+          logWarning(s"==>REUSED_EX_DEBUG: found an ${e2s(exchange)} can reuse the " +
+            s"cached one ${e2s(cachedExchange)}")
         } else {
           if (exchanges.size > 1) {
-            // found maybe a different exchange. For this case, we only care about the
-            // 4 leaf ones.
-            if (cachedExchange.child.find(f=>f.isInstanceOf[Exchange]).isDefined) {
-              logInfo("==>REUSED_EX_DEBUG: ignore this exchange, it is not the leaf one")
+            // For this case, we only care about the 4 ones closest to the file scan.
+            if (exchange.child.find(f=>f.isInstanceOf[GpuFileSourceScanExec]).isDefined) {
+              logWarning(s"==>REUSED_EX_DEBUG: found a different ${e2s(exchange, true)}")
+              logWarning(s"==>REUSED_EX_DEBUG: current Map \n" +
+                s"    ${exchanges.map{case (k, v) => (e2s(k), e2s(v))}}")
             } else {
-              logInfo(
-                s"""==>REUSED_EX_DEBUG: found maybe a different exchange:
-                   |   $cachedExchange
-                   |   (Canonicalized: ${cachedExchange.canonicalized})
-                """.stripMargin)
+              logWarning(s"==>REUSED_EX_DEBUG: ignore this ${e2s(exchange)}, not a leaf one")
             }
           } else {
-            // the first one
+            logWarning(s"==>REUSED_EX_DEBUG: skip the first ${e2s(exchange)}")
           }
         }
       case re: ReusedExchangeExec =>
-        logInfo(s"==>REUSED_EX_DEBUG: catch a ReusedExchangeExec, its child is: ")
-        logInfo(
-          s"""
-            |    ${re.child}
-            |  ===> child canonicalized
-            |    ${re.child.canonicalized}
-            |""".stripMargin)
+        logWarning(s"==>REUSED_EX_DEBUG: catch a ReusedExchangeExec," +
+          s"canonicalized hash: ${re.canonicalized.##}")
       case _ => // ignore
     }
   }
@@ -4579,7 +4595,7 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
           logWarning(s"${logPrefix}Transformed query:" +
             s"\nOriginal Plan:\n$plan\nTransformed Plan:\n$updatedPlan")
         }
-        logInfo("==>REUSED_EX_DEBUG: Start to look at reused exchange...")
+        logWarning("==>REUSED_EX_DEBUG: Start to look at reused exchange...")
         lookAtReusedExchange(updatedPlan)
         updatedPlan
       }

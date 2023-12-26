@@ -4526,7 +4526,7 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
   private def c2s(inputPlan: SparkPlan, sb: StringBuilder, level: Int = 1): Unit = {
     inputPlan.children.foreach { sp =>
       sb.append("\n").append(" " * 4 * level)
-        .append(sp.productPrefix).append("canonicalized hash: ").append(sp.canonicalized.##)
+        .append(sp.productPrefix).append(" canonicalized hash: ").append(sp.canonicalized.##)
       (0 until sp.productArity).foreach { idx =>
         sp.productElement(idx) match {
           case _: SparkPlan =>
@@ -4548,7 +4548,7 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
     if (logChildren) {
       c2s(ex.child, sb)
     }
-    sb.toString()
+    sb.append("\n\n").toString()
   }
 
   private def lookAtReusedExchange(sparkPlan: SparkPlan): Unit = {
@@ -4565,8 +4565,8 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
             // For this case, we only care about the 4 ones closest to the file scan.
             if (exchange.child.find(f=>f.isInstanceOf[GpuFileSourceScanExec]).isDefined) {
               logWarning(s"==>REUSED_EX_DEBUG: found a different ${e2s(exchange, true)}")
-              logWarning(s"==>REUSED_EX_DEBUG: current Map \n" +
-                s"    ${exchanges.map{case (k, v) => (e2s(k), e2s(v))}}")
+              logWarning(s"==>REUSED_EX_DEBUG: current Map: \n" +
+                s"    ${exchanges.map{case (k, v) => (e2s(k), e2s(v))}.mkString("\n    ")}")
             } else {
               logWarning(s"==>REUSED_EX_DEBUG: ignore this ${e2s(exchange)}, not a leaf one")
             }

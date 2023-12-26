@@ -4542,7 +4542,7 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
 
   private def e2s(ex: Exchange, moreDetails: Boolean = false): String = {
     val sb = new StringBuilder(
-      s"exchange(id: ${ex.id}, canonicalized hash: ${ex.canonicalized.##}), ")
+      s"exchange(id: ${ex.id}, canonicalized hash: ${ex.canonicalized.##})")
     if (moreDetails) {
       sb.append("\nWhole tree info:")
       p2s(ex, sb)
@@ -4560,7 +4560,7 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
         if (exchange.child.find(f => f.isInstanceOf[GpuFileSourceScanExec]).isDefined) {
           val cachedExchange =
             exchanges.getOrElseUpdate(exchange.canonicalized.asInstanceOf[Exchange], exchange)
-          if (cachedExchange.ne(exchange)) {
+          if (cachedExchange.eq(exchange)) {
             logWarning(s"==>REUSED_EX_DEBUG: found an ${e2s(exchange)} can reuse the " +
               s"cached one ${e2s(cachedExchange)}")
           } else {

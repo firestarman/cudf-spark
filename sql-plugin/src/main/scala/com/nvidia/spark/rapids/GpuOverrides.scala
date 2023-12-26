@@ -4544,11 +4544,11 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
 
   private def e2s(ex: Exchange, logChildren: Boolean = false): String = {
     val sb = new StringBuilder(
-      s"exchange(id: ${ex.id}, canonicalized hash: ${ex.canonicalized.##})")
+      s"\nexchange(id: ${ex.id}, canonicalized hash: ${ex.canonicalized.##})")
     if (logChildren) {
       c2s(ex.child, sb)
     }
-    sb.append("\n\n").toString()
+    sb.append("\n").toString()
   }
 
   private def lookAtReusedExchange(sparkPlan: SparkPlan): Unit = {
@@ -4595,7 +4595,7 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
           logWarning(s"${logPrefix}Transformed query:" +
             s"\nOriginal Plan:\n$plan\nTransformed Plan:\n$updatedPlan")
         }
-        logWarning("==>REUSED_EX_DEBUG: Start to look at reused exchange...")
+        logWarning("\n\n==>REUSED_EX_DEBUG: Start to look at reused exchange...")
         lookAtReusedExchange(updatedPlan)
         updatedPlan
       }

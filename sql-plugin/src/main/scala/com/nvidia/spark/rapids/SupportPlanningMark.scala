@@ -22,10 +22,10 @@ import scala.ref.WeakReference
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.execution.exchange.Exchange
 
-/**A trait mixed with a GPU version of Exchange to support to mark if it is optimized by GPU*/
+/** A trait mixed with a GPU version of Exchange to support to mark if it is optimized by GPU */
 trait SupportPlanningMark extends Logging { this: Exchange =>
 
-  // Some GPU Shuffle exchanges are used internally without a CPU instance, it is an Option.
+  // Some GPU Shuffle exchanges are used internally without a CPU instance, So it is an Option.
   val cpuCanonicalExec: Option[Exchange]
 
   private var _isGpuPlanningComplete = false

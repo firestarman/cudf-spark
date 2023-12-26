@@ -4523,15 +4523,14 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
   override def apply(sparkPlan: SparkPlan): SparkPlan = applyWithContext(sparkPlan, None)
 
   private val exchanges = TrieMap.empty[Exchange, Exchange]
-  private val maxLevel = 4
+  private val MaxLevel = 1
 
-  private def p2s(pro: SProduct, sb: StringBuilder, level: Int = 1): Unit = {
-    if (level > maxLevel) return
-    val (canonPro, isPlan) = pro match {
-      case sp: SparkPlan => (sp.canonicalized, true)
-      case product => (product, false)
+  private def p2s(pro: SProduct, sb: StringBuilder, numIndent: Int = 1, level: Int = 0): Unit = {
+    val (canonPro, isPlan, pLevel) = pro match {
+      case sp: SparkPlan => (sp.canonicalized, true, 0)
+      case product => (product, false, level)
     }
-    sb.append("\n").append(" " * 4 * level)
+    sb.append("\n").append(" " * 4 * numIndent)
       .append(canonPro.productPrefix).append(" hash: ").append(canonPro.##)
     (0 until canonPro.productArity).foreach { idx =>
       canonPro.productElement(idx) match {
@@ -4539,15 +4538,15 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
           // ignore
         case Seq(_: SparkPlan, _: SparkPlan, _@_*) =>
           // ignore
-        case p: SProduct =>
-          p2s(p, sb, level + 1)
+        case p: SProduct if pLevel < MaxLevel =>
+          p2s(p, sb, numIndent + 1, pLevel + 1)
         case o =>
-          sb.append("\n").append(" " * 4 * (level + 1))
+          sb.append("\n").append(" " * 4 * (numIndent + 1))
             .append(o.getClass.getSimpleName).append(" hash: ").append(o.##)
       }
     }
     if(isPlan) {
-      canonPro.asInstanceOf[SparkPlan].children.foreach(p2s(_, sb, level + 1))
+      canonPro.asInstanceOf[SparkPlan].children.foreach(p2s(_, sb, numIndent + 1))
     }
   }
 

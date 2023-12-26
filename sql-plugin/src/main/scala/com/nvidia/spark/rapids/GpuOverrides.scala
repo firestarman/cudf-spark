@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.time.ZoneId
 
+import scala.{Product => SProduct}
 import scala.collection.concurrent.TrieMap
 import scala.collection.mutable.ListBuffer
 import scala.reflect.ClassTag
@@ -4523,11 +4524,10 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
 
   private val exchanges = TrieMap.empty[Exchange, Exchange]
 
-  private def p2s(pro: Any, sb: StringBuilder, level: Int = 1): Unit = {
+  private def p2s(pro: SProduct, sb: StringBuilder, level: Int = 1): Unit = {
     val (canonPro, isPlan) = pro match {
       case sp: SparkPlan => (sp.canonicalized, true)
-      case product: Product => (product, false)
-      case t => throw new RuntimeException(s"Unsupported type ${t.getClass.getSimpleName}")
+      case product => (product, false)
     }
     sb.append("\n").append(" " * 4 * level)
       .append(canonPro.productPrefix).append(" hash: ").append(canonPro.##)
@@ -4537,7 +4537,7 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
           // ignore
         case Seq(_: SparkPlan, _: SparkPlan, _@_*) =>
           // ignore
-        case p: Product =>
+        case p: SProduct =>
           p2s(p, sb, level + 1)
         case o =>
           sb.append("\n").append(" " * 4 * (level + 1))
@@ -4554,7 +4554,7 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
       s"exchange(id: ${ex.id}, canonicalized hash: ${ex.canonicalized.##})")
     if (moreDetails) {
       sb.append("\nWhole tree info:")
-      p2s(ex.asInstanceOf[Product], sb)
+      p2s(ex, sb)
     }
     sb.toString()
   }

@@ -4544,11 +4544,12 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
 
   private def e2s(ex: Exchange, logChildren: Boolean = false): String = {
     val sb = new StringBuilder(
-      s"\nexchange(id: ${ex.id}, canonicalized hash: ${ex.canonicalized.##})")
+      s"exchange(id: ${ex.id}, canonicalized hash: ${ex.canonicalized.##}), ")
     if (logChildren) {
+      sb.append("children:")
       c2s(ex.child, sb)
     }
-    sb.append("\n").toString()
+    sb.toString()
   }
 
   private def lookAtReusedExchange(sparkPlan: SparkPlan): Unit = {
@@ -4566,7 +4567,7 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
             if (exchange.child.find(f=>f.isInstanceOf[GpuFileSourceScanExec]).isDefined) {
               logWarning(s"==>REUSED_EX_DEBUG: found a different ${e2s(exchange, true)}")
               logWarning(s"==>REUSED_EX_DEBUG: current Map: \n" +
-                s"    ${exchanges.map{case (k, v) => (e2s(k), e2s(v))}.mkString("\n    ")}")
+                s"    ${exchanges.map{case (k, v) => (k.##, e2s(v))}.mkString("\n")}")
             } else {
               logWarning(s"==>REUSED_EX_DEBUG: ignore this ${e2s(exchange)}, not a leaf one")
             }

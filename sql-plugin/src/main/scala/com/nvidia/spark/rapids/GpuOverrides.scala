@@ -4551,12 +4551,12 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
   }
 
   private def lookAtReusedExchange(sparkPlan: SparkPlan): Unit = {
-    logWarning(s"==>REUSED_EX_DEBUG: reuse exchange enabled ?= ${conf.exchangeReuseEnabled}")
+    logWarning(s"==>REUSED_EX_DEBUG: reuse exchange enabled ?= ${conf.exchangeReuseEnabled} " +
+      s"with input plan $sparkPlan")
     sparkPlan.foreach {
       case exchange: Exchange =>
         // For this case, we only care about the 4 ones closest to the file scan.
-        if (exchange.child.find(f => f.isInstanceOf[GpuFileSourceScanExec]).isDefined &&
-            exchange.child.find(f=>f.isInstanceOf[Exchange]).isEmpty) {
+        if (exchange.child.find(f => f.isInstanceOf[GpuFileSourceScanExec]).isDefined) {
           val cachedExchange =
             exchanges.getOrElseUpdate(exchange.canonicalized.asInstanceOf[Exchange], exchange)
           if (cachedExchange.ne(exchange)) {

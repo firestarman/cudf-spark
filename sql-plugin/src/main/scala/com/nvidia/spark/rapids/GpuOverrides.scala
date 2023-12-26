@@ -4523,31 +4523,29 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
 
   private val exchanges = TrieMap.empty[Exchange, Exchange]
 
-  private def c2s(inputPlan: SparkPlan, sb: StringBuilder, level: Int = 1): Unit = {
-    inputPlan.children.foreach { sp =>
-      sb.append("\n").append(" " * 4 * level)
-        .append(sp.productPrefix).append(" canonicalized hash: ").append(sp.canonicalized.##)
-      (0 until sp.productArity).foreach { idx =>
-        sp.productElement(idx) match {
-          case _: SparkPlan =>
-            // ignore
-          case Seq(_: SparkPlan, _: SparkPlan, _@_*) =>
-            // ignore
-          case o =>
-            sb.append("\n").append(" " * 4 * (level + 1))
-              .append(o.getClass.getSimpleName).append(" hash: ").append(o.##)
-        }
+  private def p2s(plan: SparkPlan, sb: StringBuilder, level: Int = 1): Unit = {
+    sb.append("\n").append(" " * 4 * level)
+      .append(plan.productPrefix).append(" canonicalized hash: ").append(plan.canonicalized.##)
+    (0 until plan.productArity).foreach { idx =>
+      plan.productElement(idx) match {
+        case _: SparkPlan =>
+        // ignore
+        case Seq(_: SparkPlan, _: SparkPlan, _@_*) =>
+        // ignore
+        case o =>
+          sb.append("\n").append(" " * 4 * (level + 1))
+            .append(o.getClass.getSimpleName).append(" hash: ").append(o.##)
       }
-      sp.children.foreach(c2s(_, sb, level + 1))
     }
+    plan.children.foreach(p2s(_, sb, level + 1))
   }
 
-  private def e2s(ex: Exchange, logChildren: Boolean = false): String = {
+  private def e2s(ex: Exchange, moreDetails: Boolean = false): String = {
     val sb = new StringBuilder(
       s"exchange(id: ${ex.id}, canonicalized hash: ${ex.canonicalized.##}), ")
-    if (logChildren) {
-      sb.append("children:")
-      c2s(ex.child, sb)
+    if (moreDetails) {
+      sb.append("\nWhole tree info:")
+      p2s(ex, sb)
     }
     sb.toString()
   }
@@ -4556,24 +4554,24 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
     logWarning(s"==>REUSED_EX_DEBUG: reuse exchange enabled ?= ${conf.exchangeReuseEnabled}")
     sparkPlan.foreach {
       case exchange: Exchange =>
-        val cachedExchange =
-          exchanges.getOrElseUpdate(exchange.canonicalized.asInstanceOf[Exchange], exchange)
-        if (cachedExchange.ne(exchange)) {
-          logWarning(s"==>REUSED_EX_DEBUG: found an ${e2s(exchange)} can reuse the " +
-            s"cached one ${e2s(cachedExchange)}")
-        } else {
-          if (exchanges.size > 1) {
-            // For this case, we only care about the 4 ones closest to the file scan.
-            if (exchange.child.find(f=>f.isInstanceOf[GpuFileSourceScanExec]).isDefined) {
+        // For this case, we only care about the 4 ones closest to the file scan.
+        if (exchange.child.find(f => f.isInstanceOf[GpuFileSourceScanExec]).isDefined) {
+          val cachedExchange =
+            exchanges.getOrElseUpdate(exchange.canonicalized.asInstanceOf[Exchange], exchange)
+          if (cachedExchange.ne(exchange)) {
+            logWarning(s"==>REUSED_EX_DEBUG: found an ${e2s(exchange)} can reuse the " +
+              s"cached one ${e2s(cachedExchange)}")
+          } else {
+            if (exchanges.size > 1) {
               logWarning(s"==>REUSED_EX_DEBUG: found a different ${e2s(exchange, true)}")
               logWarning(s"==>REUSED_EX_DEBUG: current Map: \n" +
-                s"    ${exchanges.map{case (k, v) => (k.##, e2s(v))}.mkString("\n")}")
+                s"    ${exchanges.map { case (k, v) => (k.##, e2s(v)) }.mkString("\n    ")}")
             } else {
-              logWarning(s"==>REUSED_EX_DEBUG: ignore this ${e2s(exchange)}, not a leaf one")
+              logWarning(s"==>REUSED_EX_DEBUG: skip the first ${e2s(exchange)}")
             }
-          } else {
-            logWarning(s"==>REUSED_EX_DEBUG: skip the first ${e2s(exchange)}")
           }
+        } else {
+          logWarning(s"==>REUSED_EX_DEBUG: ignore this ${e2s(exchange)}, not a leaf one")
         }
       case re: ReusedExchangeExec =>
         logWarning(s"==>REUSED_EX_DEBUG: catch a ReusedExchangeExec," +

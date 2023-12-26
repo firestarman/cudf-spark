@@ -4530,8 +4530,8 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
       case sp: SparkPlan => (sp.canonicalized, true, 0)
       case product => (product, false, level)
     }
-    sb.append("\n").append(" " * 4 * numIndent)
-      .append(canonPro.productPrefix).append(" hash: ").append(canonPro.##)
+    sb.append("\n").append(" " * 4 * numIndent).append(canonPro.getClass.getSimpleName)
+      .append("-").append(canonPro.productPrefix).append(" hash: ").append(canonPro.##)
     (0 until canonPro.productArity).foreach { idx =>
       canonPro.productElement(idx) match {
         case _: SparkPlan =>
@@ -4541,8 +4541,10 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
         case p: SProduct if pLevel < MaxLevel =>
           p2s(p, sb, numIndent + 1, pLevel + 1)
         case o =>
-          sb.append("\n").append(" " * 4 * (numIndent + 1))
-            .append(o.getClass.getSimpleName).append(" hash: ").append(o.##)
+          if (pLevel < MaxLevel) {
+            sb.append("\n").append(" " * 4 * (numIndent + 1))
+              .append(o.getClass.getSimpleName).append(" hash: ").append(o.##)
+          }
       }
     }
     if(isPlan) {

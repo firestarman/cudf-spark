@@ -4523,8 +4523,10 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
   override def apply(sparkPlan: SparkPlan): SparkPlan = applyWithContext(sparkPlan, None)
 
   private val exchanges = TrieMap.empty[Exchange, Exchange]
+  private val maxLevel = 4
 
   private def p2s(pro: SProduct, sb: StringBuilder, level: Int = 1): Unit = {
+    if (level > maxLevel) return
     val (canonPro, isPlan) = pro match {
       case sp: SparkPlan => (sp.canonicalized, true)
       case product => (product, false)

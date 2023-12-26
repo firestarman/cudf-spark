@@ -4587,7 +4587,7 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
           logWarning(s"${logPrefix}Transformed query:" +
             s"\nOriginal Plan:\n$plan\nTransformed Plan:\n$updatedPlan")
         }
-        logWarning(s"\n\n==>REUSED_EX_DEBUG: Start to look at reused exchange under $context")
+        logWarning(s"==>REUSED_EX_DEBUG: Start to look at reused exchange under $context")
         if (context.isEmpty) {
           lookAtReusedExchange(updatedPlan)
         }

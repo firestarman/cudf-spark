@@ -4552,7 +4552,8 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
 
   private def lookAtReusedExchange(sparkPlan: SparkPlan): Unit = {
     logWarning(s"==>REUSED_EX_DEBUG: reuse exchange enabled ?= ${conf.exchangeReuseEnabled} " +
-      s"with input plan $sparkPlan")
+      s"with input plan ${sparkPlan.nodeName}, current Map: \n" +
+      s"    ${exchanges.map { case (k, v) => (k.##, e2s(v)) }.mkString("\n    ")}")
     sparkPlan.foreach {
       case exchange: Exchange =>
         // For this case, we only care about the 4 ones closest to the file scan.
@@ -4565,8 +4566,8 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
           } else {
             if (exchanges.size > 1) {
               logWarning(s"==>REUSED_EX_DEBUG: found a different ${e2s(exchange, true)}")
-              logWarning(s"==>REUSED_EX_DEBUG: current Map: \n" +
-                s"    ${exchanges.map { case (k, v) => (k.##, e2s(v)) }.mkString("\n    ")}")
+           //   logWarning(s"==>REUSED_EX_DEBUG: current Map: \n" +
+           //     s"    ${exchanges.map { case (k, v) => (k.##, e2s(v)) }.mkString("\n    ")}")
             } else {
               logWarning(s"==>REUSED_EX_DEBUG: skip the first ${e2s(exchange)}")
             }

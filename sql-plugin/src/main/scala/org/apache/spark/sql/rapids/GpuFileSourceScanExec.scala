@@ -633,6 +633,7 @@ case class GpuFileSourceScanExec(
   }
 
   override def doCanonicalize(): GpuFileSourceScanExec = {
+    logInfo("doCanonicalize with a reuse fix")
     GpuFileSourceScanExec(
       relation,
       output.map(QueryPlan.normalizeExpressions(_, output)),

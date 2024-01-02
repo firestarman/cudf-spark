@@ -636,13 +636,13 @@ case class GpuFileSourceScanExec(
     logInfo("doCanonicalize with a reuse fix")
     GpuFileSourceScanExec(
       relation,
-      output.map(QueryPlan.normalizeExpressions(_, output)),
+      originalOutput.map(QueryPlan.normalizeExpressions(_, originalOutput)),
       requiredSchema,
       QueryPlan.normalizePredicates(
         filterUnusedDynamicPruningExpressions(partitionFilters), originalOutput),
       optionalBucketSet,
       optionalNumCoalescedBuckets,
-      QueryPlan.normalizePredicates(dataFilters, output),
+      QueryPlan.normalizePredicates(dataFilters, originalOutput),
       None,
       queryUsesInputFile,
       alluxioPathsMap = alluxioPathsMap)(rapidsConf)

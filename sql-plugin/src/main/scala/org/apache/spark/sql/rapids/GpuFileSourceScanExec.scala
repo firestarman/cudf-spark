@@ -429,7 +429,17 @@ case class GpuFileSourceScanExec(
     relation.fileFormat match {
       case _: GpuReadParquetFileFormat | _: GpuOrcFileFormat =>
         Map(READ_FS_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_READ_FS_TIME),
-          WRITE_BUFFER_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_WRITE_BUFFER_TIME))
+          WRITE_BUFFER_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_WRITE_BUFFER_TIME),
+          // For debugging ByteDance workloads
+          "compPageSize" -> createSizeMetric(DEBUG_LEVEL, "compressed page size"),
+          "unCompPageSize" -> createSizeMetric(DEBUG_LEVEL, "uncompressed page size"),
+          "nullCount" -> createSizeMetric(DEBUG_LEVEL, "null record count"),
+          "maxCPR" -> createAverageMetric(DEBUG_LEVEL, "max compression ratio"),
+          "minCPR" -> createAverageMetric(DEBUG_LEVEL, "min compression ratio"),
+          "maxFieldSize" -> createAverageMetric(DEBUG_LEVEL, "max size of single field"),
+          BUFFER_DATA_TIME -> createNanoTimingMetric(DEBUG_LEVEL, BUFFER_DATA_TIME),
+          BUFFER_META_TIME -> createNanoTimingMetric(DEBUG_LEVEL, BUFFER_META_TIME),
+          BUFFER_RESIZE_TIME -> createNanoTimingMetric(DEBUG_LEVEL, BUFFER_RESIZE_TIME))
       case _ =>
         Map.empty[String, GpuMetric]
     }

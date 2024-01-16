@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -697,12 +697,8 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
     // If an exchange is at the top of the plan being remapped, this is likely due to AQE
     // re-planning, and we're not allowed to change an exchange to a reused exchange in that case.
     p match {
-      case e: Exchange =>
-        logWarning("==>REUSED_EX_DEBUG: try fix up children of an exchange")
-        e.mapChildren(doFixup)
-      case _ =>
-        logWarning(s"==>REUSED_EX_DEBUG: try to fix up a spark plan ${p.nodeName}")
-        doFixup(p)
+      case e: Exchange => e.mapChildren(doFixup)
+      case _ => doFixup(p)
     }
   }
 

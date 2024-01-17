@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 package com.nvidia.spark.rapids
+
+import scala.collection.mutable
+import scala.util.Random
 
 import ai.rapids.cudf.NvtxColor
 import com.nvidia.spark.rapids.Arm.withResource
@@ -88,7 +91,23 @@ case class GpuExpandExec(
     AttributeSet(projections.flatten.flatMap(_.references))
 
   override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
-    val boundProjections = projections.map { pl =>
+    val notAllLeaf = preprojectionList.exists(_.children.nonEmpty)
+    val (finalProjections, preprojectIter) = if (useTieredProject && notAllLeaf) {
+      // Got some complicated expressions and tiered projection is enabled.
+      // Then try to do the pre-projection first.
+      val boundPreprojections = GpuBindReferences.bindGpuReferencesTiered(
+        preprojectionList, child.output, useTieredProject)
+      val preprojectIterFunc: Iterator[ColumnarBatch] => Iterator[ColumnarBatch] = iter =>
+        iter.map(cb =>
+          boundPreprojections.projectAndCloseWithRetrySingleBatch(
+            SpillableColumnarBatch(cb, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
+        )
+      (updatedProjections, preprojectIterFunc)
+    } else {
+      (projections, identity[Iterator[ColumnarBatch]] _)
+    }
+
+    val boundProjections = finalProjections.map { pl =>
       GpuBindReferences.bindGpuReferencesTiered(pl, child.output, useTieredProject)
     }
 
@@ -96,7 +115,7 @@ case class GpuExpandExec(
     val metricsMap = allMetrics
 
     child.executeColumnar().mapPartitions { it =>
-      new GpuExpandIterator(boundProjections, metricsMap, it)
+      new GpuExpandIterator(boundProjections, metricsMap, preprojectIter(it))
     }
   }
 
@@ -104,6 +123,45 @@ case class GpuExpandExec(
     throw new IllegalStateException("ROW BASED PROCESSING IS NOT SUPPORTED")
   }
 
+  /**
+   * Get the expressions that need to be pre-projected, along with the updated
+   * projections for expanding.
+   *
+   * Some Spark platforms will put non-leaf expressions in Expand projections,
+   * then it can not leverage the GPU tiered projection across the projection lists.
+   * So here tries to factor out these expressions and evaluate them before
+   * expanding to avoid duplicate evaluation for semantic-equal (sub) expressions.
+   */
+  private[this] lazy val (preprojectionList, updatedProjections) = {
+    val projectListBuffer = mutable.Set[NamedExpression]()
+    val newProjections = projections.map { proList =>
+      proList.map {
+        case attr: AttributeReference if child.outputSet.contains(attr) =>
+          // A ref to child output, add it to pre-projection for passthrough.
+          projectListBuffer += attr
+          attr
+        case leaf if leaf.children.isEmpty =>
+          // A leaf expression is simple enough, not necessary for pre-projection.
+          // e.g. GpuLiteral, and two internal columns (grouping id and grouping
+          // position) specific to Expand.
+          leaf
+        case notLeafNamed: NamedExpression =>
+          logWarning(s"==>Got a named non-leaf expression: $notLeafNamed for preprojection")
+          // A named expression, e.g. GpuAlias. Add it for pre-projection.
+          projectListBuffer += notLeafNamed
+          // Replace with its reference
+          notLeafNamed.toAttribute
+        case notLeaf =>
+          // Wrap by a GpuAlias
+          logWarning(s"==>Got a non-leaf expression: $notLeaf for preprojection")
+          val alias = GpuAlias(notLeaf, s"_preproject-c${Random.nextInt}")()
+          projectListBuffer += alias
+          // Replace with the reference of the new GpuAlias.
+          alias.toAttribute
+      }
+    }
+    (projectListBuffer.toList, newProjections)
+  }
 }
 
 class GpuExpandIterator(

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2023, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -635,13 +635,13 @@ case class GpuFileSourceScanExec(
   override def doCanonicalize(): GpuFileSourceScanExec = {
     GpuFileSourceScanExec(
       relation,
-      originalOutput.map(QueryPlan.normalizeExpressions(_, originalOutput)),
+      output.map(QueryPlan.normalizeExpressions(_, output)),
       requiredSchema,
       QueryPlan.normalizePredicates(
-        filterUnusedDynamicPruningExpressions(partitionFilters), originalOutput),
+        filterUnusedDynamicPruningExpressions(partitionFilters), output),
       optionalBucketSet,
       optionalNumCoalescedBuckets,
-      QueryPlan.normalizePredicates(dataFilters, originalOutput),
+      QueryPlan.normalizePredicates(dataFilters, output),
       None,
       queryUsesInputFile,
       alluxioPathsMap = alluxioPathsMap)(rapidsConf)

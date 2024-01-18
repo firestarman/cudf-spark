@@ -664,6 +664,10 @@ abstract class MultiFileCloudPartitionReaderBase(
             _ += (blockedTime * fileBufsAndMeta.getBufferTimePct).toLong
           }
 
+          // Update Parquet Meta as Metrics
+          fileBufsAndMeta.memBuffersAndSizes.foreach { hmbMeta =>
+            hmbMeta.blockMeta.foreach(_.updateMetrics(metrics))
+          }
           TrampolineUtil.incBytesRead(inputMetrics, fileBufsAndMeta.bytesRead)
           // if we replaced the path with Alluxio, set it to the original filesystem file
           // since Alluxio replacement is supposed to be transparent to the user

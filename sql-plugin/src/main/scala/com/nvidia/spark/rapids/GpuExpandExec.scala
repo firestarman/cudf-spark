@@ -127,9 +127,10 @@ case class GpuExpandExec(
    * Get the expressions that need to be pre-projected, along with the updated
    * projections for expanding.
    *
-   * Some Spark platforms will put non-leaf expressions in Expand projections,
-   * then it can not leverage the GPU tiered projection across the projection lists.
-   * So here tries to factor out these expressions and evaluate them before
+   * Some rules (e.g. RewriteDistinctAggregates) in Spark will put non-leaf expressions
+   * in Expand projections, then it can not leverage the GPU tiered projection across
+   * the projection lists.
+   * So here tries to factor out these expressions for later evaluations before
    * expanding to avoid duplicate evaluation for semantic-equal (sub) expressions.
    */
   private[this] lazy val (preprojectionList, updatedProjections) = {

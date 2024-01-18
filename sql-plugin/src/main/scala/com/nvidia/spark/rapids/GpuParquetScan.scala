@@ -1842,7 +1842,7 @@ private case class ParquetDataBlock(dataBlock: BlockMetaData) extends DataBlockB
       }
       ColumnStats(c.getTotalSize, c.getTotalUncompressedSize,
         nullCnt, minField, maxField)
-    }
+    }.toSeq
   }
 }
 

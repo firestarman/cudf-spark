@@ -92,7 +92,7 @@ case class GpuExpandExec(
 
   override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
     val notAllLeaf = preprojectionList.exists(_.children.nonEmpty)
-    val (finalProjections, preprojectIter) = if (useTieredProject && notAllLeaf) {
+    val (boundProjections, preprojectIter) = if (useTieredProject && notAllLeaf) {
       // Got some complicated expressions and tiered projection is enabled.
       // Then try to do the pre-projection first.
       val boundPreprojections = GpuBindReferences.bindGpuReferencesTiered(
@@ -102,13 +102,16 @@ case class GpuExpandExec(
           boundPreprojections.projectAndCloseWithRetrySingleBatch(
             SpillableColumnarBatch(cb, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
         )
-      (updatedProjections, preprojectIterFunc)
+      val preprojectAttrs = preprojectionList.map(_.toAttribute)
+      val boundLists = updatedProjections.map { pl =>
+        GpuBindReferences.bindGpuReferencesTiered(pl, preprojectAttrs, useTieredProject)
+      }
+      (boundLists, preprojectIterFunc)
     } else {
-      (projections, identity[Iterator[ColumnarBatch]] _)
-    }
-
-    val boundProjections = finalProjections.map { pl =>
-      GpuBindReferences.bindGpuReferencesTiered(pl, child.output, useTieredProject)
+      val boundLists = projections.map { pl =>
+        GpuBindReferences.bindGpuReferencesTiered(pl, child.output, useTieredProject)
+      }
+      (boundLists, identity[Iterator[ColumnarBatch]] _)
     }
 
     // cache in a local to avoid serializing the plan

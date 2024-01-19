@@ -36,7 +36,19 @@ trait GpuBatchScanExecMetrics extends GpuExec {
   lazy val fileCacheMetrics: Map[String, GpuMetric] = {
     // File cache only supported on Parquet files for now.
     scan match {
-      case _: GpuParquetScan | _: GpuOrcScan => createFileCacheMetrics()
+      case _: GpuParquetScan | _: GpuOrcScan =>
+        createFileCacheMetrics() ++
+          // For debugging ByteDance workloads
+          Map(
+            "compPageSize" -> createSizeMetric(DEBUG_LEVEL, "compressed page size"),
+            "unCompPageSize" -> createSizeMetric(DEBUG_LEVEL, "uncompressed page size"),
+            "nullCount" -> createSizeMetric(DEBUG_LEVEL, "null record count"),
+            "maxCPR" -> createAverageMetric(DEBUG_LEVEL, "max compression ratio"),
+            "minCPR" -> createAverageMetric(DEBUG_LEVEL, "min compression ratio"),
+            "maxFieldSize" -> createAverageMetric(DEBUG_LEVEL, "max size of single field"),
+            BUFFER_DATA_TIME -> createNanoTimingMetric(DEBUG_LEVEL, BUFFER_DATA_TIME),
+            BUFFER_META_TIME -> createNanoTimingMetric(DEBUG_LEVEL, BUFFER_META_TIME),
+            BUFFER_RESIZE_TIME -> createNanoTimingMetric(DEBUG_LEVEL, BUFFER_RESIZE_TIME))
       case _ => Map.empty
     }
   }

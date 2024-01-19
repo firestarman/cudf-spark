@@ -46,6 +46,7 @@ import org.apache.hadoop.fs.{FSDataInputStream, Path}
 import org.apache.parquet.bytes.BytesUtils
 import org.apache.parquet.bytes.BytesUtils.readIntLittleEndian
 import org.apache.parquet.column.ColumnDescriptor
+import org.apache.parquet.column.statistics.{BinaryStatistics, BooleanStatistics, DoubleStatistics, FloatStatistics, IntStatistics, LongStatistics}
 import org.apache.parquet.filter2.predicate.FilterApi
 import org.apache.parquet.format.converter.ParquetMetadataConverter
 import org.apache.parquet.hadoop.{ParquetFileReader, ParquetInputFormat}
@@ -1598,6 +1599,7 @@ trait ParquetPartitionReaderBase extends Logging with ScanWithMetrics
     val copyBuffer: Array[Byte] = new Array[Byte](copyBufferSize)
     withResource(filePath.getFileSystem(fileHadoopConf).open(filePath)) { in =>
       coalescedRanges.foreach { blockCopy =>
+
         totalBytesCopied += copyDataRange(blockCopy, in, out, copyBuffer)
       }
     }
@@ -1821,6 +1823,29 @@ private case class ParquetDataBlock(dataBlock: BlockMetaData) extends DataBlockB
   override def getRowCount: Long = dataBlock.getRowCount
   override def getReadDataSize: Long = dataBlock.getTotalByteSize
   override def getBlockSize: Long = dataBlock.getColumns.asScala.map(_.getTotalSize).sum
+
+  override protected def getColumnStatistics: Seq[ColumnStats] = {
+    dataBlock.getColumns.asScala.map { c =>
+      val (nullCnt, minField, maxField) = c.getStatistics match {
+        case s: BinaryStatistics =>
+          (s.getNumNulls, s.genericGetMin.length, s.genericGetMax.length)
+        case s: BooleanStatistics =>
+          (s.getNumNulls, 1, 1)
+        case s: IntStatistics =>
+          (s.getNumNulls, 4, 4)
+        case s: LongStatistics =>
+          (s.getNumNulls, 8, 8)
+        case s: FloatStatistics =>
+          (s.getNumNulls, 4, 4)
+        case s: DoubleStatistics =>
+          (s.getNumNulls, 8, 8)
+        case s =>
+          throw new Exception(s"Invalid value $s")
+      }
+      ColumnStats(c.getTotalSize, c.getTotalUncompressedSize,
+        nullCnt, minField, maxField)
+    }.toSeq
+  }
 }
 
 /** Parquet extra information containing rebase modes and whether there is int96 timestamp */

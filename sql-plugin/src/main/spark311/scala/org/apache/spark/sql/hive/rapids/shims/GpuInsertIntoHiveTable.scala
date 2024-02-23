@@ -69,7 +69,7 @@ final class GpuInsertIntoHiveTableMeta(cmd: InsertIntoHiveTable,
   private var fileFormat: Option[ColumnarFileFormat] = None
 
   override def tagSelfForGpuInternal(): Unit = {
-    fileFormat = Some(GpuHiveFileFormat.tagGpuSupport(this))
+    fileFormat = GpuHiveFileFormat.tagGpuSupport(this)
   }
 
   override def convertToGpu(): GpuDataWritingCommand = {

@@ -29,13 +29,16 @@ import org.apache.hadoop.mapreduce.{Job, TaskAttemptContext}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.execution.datasources.parquet.ParquetOptions
-import org.apache.spark.sql.hive.rapids.GpuHiveTextFileUtils._
 import org.apache.spark.sql.hive.rapids.shims.GpuInsertIntoHiveTableMeta
-import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.types.{DataType, StringType, StructType}
+import org.apache.spark.sql.rapids.execution.TrampolineUtil
+import org.apache.spark.sql.types.{DataType, Decimal, DecimalType, StringType, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 object GpuHiveFileFormat extends Logging {
+  private val parquetOutputFormatClass =
+    "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat"
+  private val parquetSerdeClass =
+    "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"
 
   def tagGpuSupport(meta: GpuInsertIntoHiveTableMeta): Option[ColumnarFileFormat] = {
     val insertCmd = meta.wrapped
@@ -64,29 +67,49 @@ object GpuHiveFileFormat extends Logging {
 
   private def tagGpuSupportForParquet(meta: GpuInsertIntoHiveTableMeta): ColumnarFileFormat = {
     val insertCmd = meta.wrapped
+    val storage = insertCmd.table.storage
     // Configs check for Parquet write enabling/disabling
+
     // FIXME Need to check serde and output format classes ?
+    if (storage.outputFormat.getOrElse("") != parquetOutputFormatClass) {
+      meta.willNotWorkOnGpu(s"unsupported output-format found: ${storage.outputFormat}, " +
+        s"only $parquetOutputFormatClass is currently supported for Parquet")
+    }
+    if (storage.serde.getOrElse("") != parquetSerdeClass) {
+      meta.willNotWorkOnGpu(s"unsupported serde found: ${storage.serde}, " +
+        s"only $parquetSerdeClass is currently supported for Parquet")
+    }
+
+    // Decimal type check
+    val hasIntOrLongBackedDec = insertCmd.table.schema.exists { field =>
+      TrampolineUtil.dataTypeExistsRecursively(field.dataType, {
+        case dec: DecimalType if dec.precision <= Decimal.MAX_LONG_DIGITS => true
+        case _ => false
+      })
+    }
+    if (hasIntOrLongBackedDec) {
+      meta.willNotWorkOnGpu("decimal can fit inside an int or a long is not supported " +
+        s"for Parquet. Hive always writes decimal as binary array but GPU writes it " +
+        s"as an int or a long")
+    }
 
     // FIXME Need a new format type for Hive Parquet write ?
     FileFormatChecks.tag(meta, insertCmd.table.schema, ParquetFormatType, WriteFileOp)
 
-    // Compression
-    var compType = CompressionType.NONE
-    if (isCompressionEnabled(insertCmd.conf)) {
-      val parquetOptions = new ParquetOptions(insertCmd.table.properties, insertCmd.conf)
-      val compressionType =
-        GpuParquetFileFormat.parseCompressionType(parquetOptions.compressionCodecClassName)
-      if (compressionType.nonEmpty) {
-        compType = compressionType.get
-      } else {
-        meta.willNotWorkOnGpu(
-          s"compression codec ${parquetOptions.compressionCodecClassName} is not supported")
-      }
-    }
-    new GpuHiveParquetFileFormat(compType)
+    // Compression type
+    val parquetOptions = new ParquetOptions(insertCmd.table.properties, insertCmd.conf)
+    val compressionType =
+      GpuParquetFileFormat.parseCompressionType(parquetOptions.compressionCodecClassName)
+        .getOrElse {
+          meta.willNotWorkOnGpu("compression codec " +
+            s"${parquetOptions.compressionCodecClassName} is not supported for Parquet")
+          CompressionType.NONE
+        }
+    new GpuHiveParquetFileFormat(compressionType)
   }
 
   private def tagGpuSupportForText(meta: GpuInsertIntoHiveTableMeta): ColumnarFileFormat = {
+    import org.apache.spark.sql.hive.rapids.GpuHiveTextFileUtils._
     if (!meta.conf.isHiveDelimitedTextEnabled) {
       meta.willNotWorkOnGpu("Hive text I/O has been disabled. To enable this, " +
         s"set ${RapidsConf.ENABLE_HIVE_TEXT} to true")
@@ -133,7 +156,7 @@ object GpuHiveFileFormat extends Logging {
       meta.willNotWorkOnGpu("only UTF-8 is supported as the charset")
     }
 
-    if (isCompressionEnabled(insertCommand.conf)) {
+    if (insertCommand.conf.getConfString("hive.exec.compress.output", "false").toBoolean) {
       meta.willNotWorkOnGpu("compressed output is not supported, " +
         "set hive.exec.compress.output to false to enable writing Hive text via GPU")
     }
@@ -143,23 +166,26 @@ object GpuHiveFileFormat extends Logging {
 
     new GpuHiveTextFileFormat()
   }
-
-  private def isCompressionEnabled(conf: SQLConf): Boolean = {
-    conf.getConfString("hive.exec.compress.output", "false").toBoolean
-  }
 }
 
 class GpuHiveParquetFileFormat(compType: CompressionType) extends ColumnarFileFormat {
 
   override def prepareWrite(sparkSession: SparkSession, job: Job,
       options: Map[String, String], dataSchema: StructType): ColumnarOutputWriterFactory = {
+
+    // Avoid referencing the outer object.
+    val compressionType = compType
     new ColumnarOutputWriterFactory {
-      override def getFileExtension(context: TaskAttemptContext): String = ".parquet"
+      override def getFileExtension(context: TaskAttemptContext): String =
+        compressionType match {
+          case CompressionType.NONE => ".parquet"
+          case ct => s".${ct.name().toLowerCase(Locale.ROOT)}.parquet"
+        }
 
       override def newInstance(path: String,
           dataSchema: StructType,
           context: TaskAttemptContext): ColumnarOutputWriter = {
-        new GpuHiveParquetWriter(path, dataSchema, context, compType)
+        new GpuHiveParquetWriter(path, dataSchema, context, compressionType)
       }
     }
   }
@@ -170,18 +196,21 @@ class GpuHiveParquetWriter(override val path: String, dataSchema: StructType,
   extends ColumnarOutputWriter(context, dataSchema, "HiveParquet", false) {
 
   override protected val tableWriter: CudfTableWriter = {
-    // TODO How to set INT96 and FieldIDEnabled ?
-    val writeOptions = SchemaUtils
-      .writerOptionsFromSchema(ParquetWriterOptions.builder(), dataSchema)
+    // TODO How to set FieldIDEnabled ?
+    val optionsBuilder = SchemaUtils
+      .writerOptionsFromSchema(ParquetWriterOptions.builder(), dataSchema,
+        writeInt96 = true,      // Hive 1.2 write timestamp as INT96
+        parquetFieldIdEnabled = false)
       .withCompressionType(compType)
-      .build()
-    Table.writeParquetChunked(writeOptions, this)
+    Table.writeParquetChunked(optionsBuilder.build(), this)
   }
+
 }
 
 class GpuHiveTextFileFormat extends ColumnarFileFormat with Logging {
 
-  override def supportDataType(dataType: DataType): Boolean = isSupportedType(dataType)
+  override def supportDataType(dataType: DataType): Boolean =
+    GpuHiveTextFileUtils.isSupportedType(dataType)
 
   override def prepareWrite(sparkSession: SparkSession,
                             job: Job,

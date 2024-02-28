@@ -81,7 +81,7 @@ object GpuHiveFileFormat extends Logging {
     }
 
     // Decimal type check
-    val hasIntOrLongBackedDec = insertCmd.table.schema.exists { field =>
+    val hasIntOrLongBackedDec = insertCmd.query.schema.exists { field =>
       TrampolineUtil.dataTypeExistsRecursively(field.dataType, {
         case dec: DecimalType if dec.precision <= Decimal.MAX_LONG_DIGITS => true
         case _ => false

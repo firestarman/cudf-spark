@@ -14,11 +14,11 @@
 
 import pytest
 
-from asserts import *
+from asserts import assert_gpu_and_cpu_sql_writes_are_equal_collect
 from data_gen import *
 from hive_write_test import _restricted_timestamp
-from marks import *
-from spark_session import *
+from marks import allow_non_gpu, ignore_order
+from spark_session import with_cpu_session
 
 # Disable the meta conversion from Hive write to FrameData write in Spark, to test
 # "GpuInsertIntoHiveTable" for Parquet write.
@@ -81,7 +81,7 @@ def test_write_parquet_into_hive_table(spark_tmp_table_factory, gens, is_ctas):
         else:
             # Create Table Then Write
             return [
-                "CREATE TABLE {} LIKE {} ".format(output_table, input_table),
+                "CREATE TABLE {} LIKE {}".format(output_table, input_table),
                 "INSERT OVERWRITE TABLE {} SELECT * FROM {}".format(output_table, input_table)
             ]
 
@@ -139,3 +139,33 @@ def test_write_parquet_into_partitioned_hive_table(spark_tmp_table_factory, is_s
         spark_tmp_table_factory,
         partitioned_write_to_hive_sql,
         all_confs)
+
+
+@allow_non_gpu('HiveTableScanExec', *non_utc_allow)
+@ignore_order(local=True)
+@pytest.mark.parametrize("comp_type", ['UNCOMPRESSED', 'ZSTD', 'SNAPPY'])
+def test_write_compressed_parquet_into_hive_table(spark_tmp_table_factory, comp_type):
+    # Generate hive table in Parquet format
+    def gen_hive_table(spark):
+        gens = _hive_basic_gens + _hive_struct_gens + _hive_array_gens + _hive_map_gens
+        gen_list = [('_c' + str(i), gen) for i, gen in enumerate(gens)]
+        data_table = spark_tmp_table_factory.get()
+        gen_df(spark, gen_list).createOrReplaceTempView(data_table)
+        hive_table = spark_tmp_table_factory.get()
+        spark.sql("CREATE TABLE {} STORED AS PARQUET AS SELECT * FROM {}".format(
+            hive_table, data_table))
+        return hive_table
+
+    input_table = with_cpu_session(gen_hive_table)
+
+    def write_to_hive_sql(spark, output_table):
+        return [
+            "CREATE TABLE {} LIKE {} TBLPROPERTIES ('parquet.compression'='{}')".format(
+                output_table, input_table, comp_type),
+            "INSERT OVERWRITE TABLE {} SELECT * FROM {}".format(output_table, input_table)
+        ]
+
+    assert_gpu_and_cpu_sql_writes_are_equal_collect(
+        spark_tmp_table_factory,
+        write_to_hive_sql,
+        _write_to_hive_conf)

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -77,6 +77,26 @@ public final class RapidsHostColumnVector extends RapidsHostColumnVectorCore {
       }
     }
     return sum;
+  }
+
+  // The size in bytes of an offset entry is 4
+  final static int OFFSET_STEP = 4;
+
+  // The size in bytes of an offset entry is 4, so shift value is 2.
+  final static int OFFSET_SHIFT_STEP = 2;
+
+  public static long getOffsetBufferSize(int numRows) {
+    // The size in bytes of an offset entry is 4, so the buffer size is:
+    // (numRows + 1) * 4.
+    return ((long)numRows + 1) << OFFSET_SHIFT_STEP;
+  }
+
+  public static long getValidityBufferSize(int numRows) {
+    // This is the same as ColumnView.getValidityBufferSize
+    // number of bytes required = Math.ceil(number of bits / 8)
+    long actualBytes = ((long) numRows + 7) >> 3;
+    // padding to the multiplies of the padding boundary(64 bytes)
+    return ((actualBytes + 63) >> 6) << 6;
   }
 
   private final ai.rapids.cudf.HostColumnVector cudfCv;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -176,11 +176,7 @@ public class SlicedGpuColumnVector extends ColumnVector {
     if (end > start) {
       ai.rapids.cudf.HostMemoryBuffer validity = cv.getValidity();
       if (validity != null) {
-        // This is the same as ColumnView.getValidityBufferSize
-        // number of bytes required = Math.ceil(number of bits / 8)
-        long actualBytes = ((long) (end - start) + 7) >> 3;
-        // padding to the multiplies of the padding boundary(64 bytes)
-        total += ((actualBytes + 63) >> 6) << 6;
+        total += RapidsHostColumnVector.getValidityBufferSize(end - start);
       }
       ai.rapids.cudf.HostMemoryBuffer off = cv.getOffsets();
       if (off != null) {

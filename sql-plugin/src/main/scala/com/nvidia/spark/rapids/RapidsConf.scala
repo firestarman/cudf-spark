@@ -1755,6 +1755,31 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
         .integerConf
         .createWithDefault(20)
 
+  val SHUFFLE_WRITER_COALESCE_ENABLED = conf("spark.rapids.shuffle.writer.coalesce.enabled")
+    .doc("when false, disable the small batches coalescing for shuffle write that slicing" +
+      " batches on CPU.")
+    .internal()
+    .booleanConf
+    .createWithDefault(true)
+
+  val SHUFFLE_WRITER_COALESCE_MIN_PARTITION_SIZE =
+    conf("spark.rapids.shuffle.writer.coalesce.minPartitionSize")
+      .doc("The minimum partition size for the coalescing shuffle write. Batches" +
+        " of a partition will be coalesced until the total size goes beyond this size," +
+        " then push the coalesced partition data down to the shuffle writer for" +
+        " serialization.")
+      .internal()
+      .bytesConf(ByteUnit.BYTE)
+      .createWithDefault(5 * 1024 * 1024) // 5MB
+
+  val SHUFFLE_WRITER_COALESCE_TOTAL_PARTITIONS_SIZE =
+    conf("spark.rapids.shuffle.writer.coalesce.totalPartitionsSize")
+      .doc("The total size for all the tasks to cache the batches for coalescing" +
+        " when doing the shuffle write")
+      .internal()
+      .bytesConf(ByteUnit.BYTE)
+      .createWithDefault(10 * 1024 * 1024 * 1024) // 10GB
+
   // ALLUXIO CONFIGS
   val ALLUXIO_MASTER = conf("spark.rapids.alluxio.master")
     .doc("The Alluxio master hostname. If not set, read Alluxio master URL from " +
@@ -2750,6 +2775,14 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val shuffleMultiThreadedWriterThreads: Int = get(SHUFFLE_MULTITHREADED_WRITER_THREADS)
 
   lazy val shuffleMultiThreadedReaderThreads: Int = get(SHUFFLE_MULTITHREADED_READER_THREADS)
+
+  lazy val isShuffleWriteCoalesceEnabled: Boolean = get(SHUFFLE_WRITER_COALESCE_ENABLED)
+
+  lazy val shuffleWriteCoalesceMinPartSize: Long =
+    get(SHUFFLE_WRITER_COALESCE_MIN_PARTITION_SIZE)
+
+  lazy val shuffleWriteCoalesceTotalPartsSize: Long =
+    get(SHUFFLE_WRITER_COALESCE_TOTAL_PARTITIONS_SIZE)
 
   def isUCXShuffleManagerMode: Boolean =
     RapidsShuffleManagerMode

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,16 +17,21 @@
 package org.apache.spark.sql.rapids.execution
 
 import scala.collection.AbstractIterator
+import scala.collection.mutable
 import scala.concurrent.Future
 
+import ai.rapids.cudf.NvtxColor
 import com.nvidia.spark.rapids._
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.shims.{GpuHashPartitioning, GpuRangePartitioning, ShimUnaryExecNode, ShuffleOriginUtil, SparkShimImpl}
 
 import org.apache.spark.{MapOutputStatistics, ShuffleDependency}
+import org.apache.spark.internal.Logging
 import org.apache.spark.rapids.shims.GpuShuffleExchangeExec
 import org.apache.spark.rdd.RDD
 import org.apache.spark.serializer.Serializer
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, SortOrder}
 import org.apache.spark.sql.catalyst.plans.physical.RoundRobinPartitioning
@@ -209,7 +214,9 @@ abstract class GpuShuffleExchangeExecBase(
     "rapidsShuffleWriteIoTime" ->
         createNanoTimingMetric(DEBUG_LEVEL,"rs. shuffle write io time"),
     "rapidsShuffleReadTime" ->
-        createNanoTimingMetric(ESSENTIAL_LEVEL,"rs. shuffle read time")
+        createNanoTimingMetric(ESSENTIAL_LEVEL,"rs. shuffle read time"),
+    "rapidsShuffleWriteCoalesceTime" ->
+        createNanoTimingMetric(MODERATE_LEVEL,"rs. shuffle write coalesce time")
   ) ++ GpuMetric.wrap(readMetrics) ++ GpuMetric.wrap(writeMetrics)
 
   // Spark doesn't report totalTime for this operator so we override metrics
@@ -273,7 +280,7 @@ abstract class GpuShuffleExchangeExecBase(
     }
 }
 
-object GpuShuffleExchangeExecBase {
+object GpuShuffleExchangeExecBase extends Logging {
   def prepareBatchShuffleDependency(
       rdd: RDD[ColumnarBatch],
       outputAttributes: Seq[Attribute],
@@ -312,76 +319,16 @@ object GpuShuffleExchangeExecBase {
     } else {
       rdd
     }
-    val partitioner: GpuExpression = getPartitioner(newRdd, outputAttributes, newPartitioning)
-    def getPartitioned: ColumnarBatch => Any = {
-      batch => partitioner.columnarEvalAny(batch)
-    }
-    val rddWithPartitionIds: RDD[Product2[Int, ColumnarBatch]] = {
-      newRdd.mapPartitions { iter =>
-        val getParts = getPartitioned
-        new AbstractIterator[Product2[Int, ColumnarBatch]] {
-          private var partitioned : Array[(ColumnarBatch, Int)] = _
-          private var at = 0
-          private val mutablePair = new MutablePair[Int, ColumnarBatch]()
-          private def partNextBatch(): Unit = {
-            if (partitioned != null) {
-              partitioned.map(_._1).safeClose()
-              partitioned = null
-              at = 0
-            }
-            if (iter.hasNext) {
-              var batch = iter.next()
-              while (batch.numRows == 0 && iter.hasNext) {
-                batch.close()
-                batch = iter.next()
-              }
-              // Get a non-empty batch or the last batch. So still need to
-              // check if it is empty for the later case.
-              if (batch.numRows > 0) {
-                partitioned = getParts(batch).asInstanceOf[Array[(ColumnarBatch, Int)]]
-                partitioned.foreach(batches => {
-                  metrics(GpuMetric.NUM_OUTPUT_ROWS) += batches._1.numRows()
-                })
-                metrics(GpuMetric.NUM_OUTPUT_BATCHES) += partitioned.length
-                at = 0
-              } else {
-                batch.close()
-              }
-            }
-          }
-
-          override def hasNext: Boolean = {
-            if (partitioned == null || at >= partitioned.length) {
-              partNextBatch()
-            }
-
-            partitioned != null && at < partitioned.length
-          }
-
-          override def next(): Product2[Int, ColumnarBatch] = {
-            if (partitioned == null || at >= partitioned.length) {
-              partNextBatch()
-            }
-            if (partitioned == null || at >= partitioned.length) {
-              throw new NoSuchElementException("Walked off of the end...")
-            }
-            val tup = partitioned(at)
-            mutablePair.update(tup._2, tup._1)
-            at += 1
-            mutablePair
-          }
-        }
-      }
-    }
+    val partitioner = getPartitioner(newRdd, outputAttributes, newPartitioning)
+    val f = makeShuffleIteratorFunc(useGPUShuffle, partitioner, metrics)
 
     // Now, we manually create a GpuShuffleDependency. Because pairs in rddWithPartitionIds
     // are in the form of (partitionId, row) and every partitionId is in the expected range
     // [0, part.numPartitions - 1]. The partitioner of this is a PartitionIdPassthrough.
     // We do a GPU version because it allows us to know that the data is on the GPU so we can
     // detect it and do further processing if needed.
-    val dependency =
-    new GpuShuffleDependency[Int, ColumnarBatch, ColumnarBatch](
-      rddWithPartitionIds,
+    val dependency = new GpuShuffleDependency[Int, ColumnarBatch, ColumnarBatch](
+      newRdd.mapPartitions(f),
       new BatchPartitionIdPassthrough(newPartitioning.numPartitions),
       sparkTypes,
       serializer,
@@ -411,6 +358,185 @@ object GpuShuffleExchangeExecBase {
       case rrp: GpuRoundRobinPartitioning =>
         GpuBindReferences.bindReference(rrp, outputAttributes)
       case _ => sys.error(s"Exchange not implemented for $newPartitioning")
+    }
+  }
+
+  private def makeShuffleIteratorFunc(
+      useGPUShuffle: Boolean,
+      partitioner: GpuExpression,
+      metrics: Map[String, GpuMetric]
+  ): Iterator[ColumnarBatch] => Iterator[Product2[Int, ColumnarBatch]] = {
+    val getPartitioned: ColumnarBatch => Array[(ColumnarBatch, Int)] = {
+      batch => partitioner.columnarEvalAny(batch).asInstanceOf[Array[(ColumnarBatch, Int)]]
+    }
+    val sqlConf = SQLConf.get
+    val rapidsConf = new RapidsConf(sqlConf)
+    val coalShuffleWriteEnabled = rapidsConf.isShuffleWriteCoalesceEnabled
+    // Coalesce write for GPU shuffle is not supported yet
+    if (!useGPUShuffle && coalShuffleWriteEnabled) {
+      makeCoalesceShuffleIterator(getPartitioned, metrics,
+        rapidsConf.shuffleWriteCoalesceMinPartSize,
+        rapidsConf.shuffleWriteCoalesceTotalPartsSize,
+        sqlConf.numShufflePartitions)
+    } else {
+      makePassThroughShuffleIterator(getPartitioned, metrics)
+    }
+  }
+
+  private def makePassThroughShuffleIterator(
+      getParts: ColumnarBatch => Array[(ColumnarBatch, Int)],
+      metrics: Map[String, GpuMetric]
+  ): Iterator[ColumnarBatch] => Iterator[Product2[Int, ColumnarBatch]] = {
+    iter => new AbstractIterator[Product2[Int, ColumnarBatch]] {
+      private var partitioned: Array[(ColumnarBatch, Int)] = _
+      private var at = 0
+      private val mutablePair = new MutablePair[Int, ColumnarBatch]()
+
+      private def partNextBatch(): Unit = {
+        if (partitioned != null) {
+          partitioned.map(_._1).safeClose()
+          partitioned = null
+          at = 0
+        }
+        if (iter.hasNext) {
+          var batch = iter.next()
+          while (batch.numRows == 0 && iter.hasNext) {
+            batch.close()
+            batch = iter.next()
+          }
+          // Get a non-empty batch or the last batch. So still need to
+          // check if it is empty for the later case.
+          if (batch.numRows > 0) {
+            partitioned = getParts(batch)
+            metrics(GpuMetric.NUM_OUTPUT_ROWS) += partitioned.map(_._1.numRows()).sum
+            metrics(GpuMetric.NUM_OUTPUT_BATCHES) += partitioned.length
+            at = 0
+          } else {
+            batch.close()
+          }
+        }
+      }
+
+      override def hasNext: Boolean = {
+        if (partitioned == null || at >= partitioned.length) {
+          partNextBatch()
+        }
+
+        partitioned != null && at < partitioned.length
+      }
+
+      override def next(): Product2[Int, ColumnarBatch] = {
+        if (partitioned == null || at >= partitioned.length) {
+          partNextBatch()
+        }
+        if (partitioned == null || at >= partitioned.length) {
+          throw new NoSuchElementException("Walked off of the end...")
+        }
+        val tup = partitioned(at)
+        mutablePair.update(tup._2, tup._1)
+        at += 1
+        mutablePair
+      }
+    }
+  }
+
+  private def makeCoalesceShuffleIterator(
+      getParts: ColumnarBatch => Array[(ColumnarBatch, Int)],
+      metrics: Map[String, GpuMetric],
+      confMinPartSize: Long,
+      confMaxTotalPartSize: Long,
+      shufflePartsNum: Int
+  ): Iterator[ColumnarBatch] => Iterator[Product2[Int, ColumnarBatch]] = {
+    val outputBatchesNum = metrics(GpuMetric.NUM_OUTPUT_BATCHES)
+    val outputRowsNum = metrics(GpuMetric.NUM_OUTPUT_ROWS)
+    val concatTime = metrics("rapidsShuffleWriteCoalesceTime")
+    val parallelism = SparkSession.active.leafNodeDefaultParallelism
+    val partSizePerCore = confMaxTotalPartSize / (parallelism * shufflePartsNum)
+    // At least 32KB
+    val finalMinPartSize = Math.max(Math.min(confMinPartSize, partSizePerCore), 32 * 1024)
+    logInfo(s"==> Creating CoalesceShuffleIterator(min partition size: " +
+      s"$finalMinPartSize for shuffle write...")
+
+    iter => new AbstractIterator[Product2[Int, ColumnarBatch]] {
+      type PartBuffers = mutable.ArrayBuffer[ColumnarBatch]
+      private val partitioned = new mutable.LinkedHashMap[Int, (Long, PartBuffers)]()
+      private val readyParts = new mutable.Queue[(Int, Long, PartBuffers)]()
+      private var retPair: Option[(Int, ColumnarBatch)] = None
+      ScalableTaskCompletion.onTaskCompletion {
+        retPair.foreach(_._2.safeClose())
+        (partitioned.values.flatMap(_._2) ++ readyParts.flatMap(_._3)).toSeq.safeClose()
+      }
+      private var retConsumed = true
+
+      private def partNextBatch(): Unit = {
+        var batch = iter.next()
+        while (batch.numRows == 0 && iter.hasNext) {
+          batch.close()
+          batch = iter.next()
+        }
+        // Get a non-empty batch or the last batch. So still need to
+        // check if it is empty for the later case.
+        if (batch.numRows > 0) {
+          val parts = getParts(batch)
+          withResource(parts.map(_._1).toSeq) { _ =>
+            parts.foreach { case (cb, partId) =>
+              val (accSize, buf) = partitioned.remove(partId).getOrElse((0L, new PartBuffers))
+              // For now only CPU shuffle is supported, so "SlicedGpuColumnVector" is expected.
+              val totalSize = accSize + SlicedGpuColumnVector.getTotalHostMemoryUsed(cb)
+              buf += SlicedGpuColumnVector.incRefCount(cb)
+              if (totalSize >= finalMinPartSize) {
+                // Part is ready to write
+                readyParts.enqueue((partId, totalSize, buf))
+              } else {
+                partitioned.put(partId, (totalSize, buf))
+              }
+            }
+          }
+        } else {
+          batch.close()
+        }
+      }
+
+      private def determineNextPart(): Option[(Int, ColumnarBatch)] = {
+        while (readyParts.isEmpty && iter.hasNext) {
+          partNextBatch()
+        }
+        (if (readyParts.nonEmpty) { // Get one from ready buffer
+          Some(readyParts.dequeue())
+        } else {
+          partitioned.headOption.map { case (partId, (size, cbs)) =>
+            partitioned.remove(partId)
+            (partId, size, cbs)
+          }
+        }).map { case (partId, cbsSize, batches) =>
+          val merged = withResource(new NvtxWithMetrics(
+              "Shuffle Write Concat", NvtxColor.BLUE, concatTime)) { _ =>
+            GpuBatchUtils.concatShuffleBatchesAndClose(batches.toSeq, Some(cbsSize))
+          }
+          closeOnExcept(merged) { _ =>
+            outputBatchesNum += 1
+            outputRowsNum += merged.numRows()
+            (partId, merged)
+          }
+        }
+      }
+
+      override def hasNext: Boolean = {
+        if (retConsumed) {
+          val pair = determineNextPart()
+          retPair.foreach(_._2.close())
+          retPair = pair
+          retConsumed = false
+        }
+        retPair.isDefined
+      }
+
+      override def next(): Product2[Int, ColumnarBatch] = {
+        if (!hasNext) throw new NoSuchElementException("Walked off of the end...")
+        val ret = retPair.get
+        retConsumed = true
+        ret
+      }
     }
   }
 }

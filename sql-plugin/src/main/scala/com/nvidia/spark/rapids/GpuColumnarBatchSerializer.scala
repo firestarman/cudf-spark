@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,19 +22,18 @@ import java.nio.ByteBuffer
 import scala.collection.mutable.ArrayBuffer
 import scala.reflect.ClassTag
 
-import ai.rapids.cudf.{HostColumnVector, HostMemoryBuffer, JCudfSerialization, NvtxColor, NvtxRange}
+import ai.rapids.cudf.{ContiguousTable, DeviceMemoryBuffer, HostColumnVector, HostMemoryBuffer, JCudfSerialization, NvtxColor, NvtxRange}
 import ai.rapids.cudf.JCudfSerialization.SerializedTableHeader
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
+import com.nvidia.spark.rapids.format.TableMeta
 
 import org.apache.spark.TaskContext
 import org.apache.spark.serializer.{DeserializationStream, SerializationStream, Serializer, SerializerInstance}
-import org.apache.spark.sql.types.NullType
-import org.apache.spark.sql.vectorized.ColumnarBatch
+import org.apache.spark.sql.types.{DataType, NullType}
+import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
 
-class SerializedBatchIterator(dIn: DataInputStream)
-  extends Iterator[(Int, ColumnarBatch)] {
+class SerializedBatchIterator(dIn: DataInputStream) extends Iterator[(Int, ColumnarBatch)] {
   private[this] var nextHeader: Option[SerializedTableHeader] = None
   private[this] var toBeReturned: Option[ColumnarBatch] = None
   private[this] var streamClosed: Boolean = false
@@ -108,6 +107,7 @@ class SerializedBatchIterator(dIn: DataInputStream)
     (0, ret)
   }
 }
+
 /**
  * Serializer for serializing `ColumnarBatch`s for use during normal shuffle.
  *
@@ -124,67 +124,80 @@ class SerializedBatchIterator(dIn: DataInputStream)
  *
  * @note The RAPIDS shuffle does not use this code.
  */
-class GpuColumnarBatchSerializer(dataSize: GpuMetric)
-    extends Serializer with Serializable {
+class GpuColumnarBatchSerializer(dataSize: GpuMetric, serializingOnGpu: Boolean = false,
+    sparkTypes: Array[DataType] = Array.empty) extends Serializer with Serializable {
   override def newInstance(): SerializerInstance =
-    new GpuColumnarBatchSerializerInstance(dataSize)
+    new GpuColumnarBatchSerializerInstance(dataSize, serializingOnGpu, sparkTypes)
   override def supportsRelocationOfSerializedObjects: Boolean = true
 }
 
-private class GpuColumnarBatchSerializerInstance(dataSize: GpuMetric) extends SerializerInstance {
+private class GpuColumnarBatchSerializerInstance(
+    dataSize: GpuMetric,
+    serializingOnGpu: Boolean,
+    sparkTypes: Array[DataType]) extends SerializerInstance {
+
+  private lazy val tableSerializer = new SimpleTableSerializer(sparkTypes)
 
   override def serializeStream(out: OutputStream): SerializationStream = new SerializationStream {
-    private[this] val dOut: DataOutputStream =
-      new DataOutputStream(new BufferedOutputStream(out))
+    private[this] val dOut = new DataOutputStream(new BufferedOutputStream(out))
 
-    override def writeValue[T: ClassTag](value: T): SerializationStream = {
-      val batch = value.asInstanceOf[ColumnarBatch]
-      val numColumns = batch.numCols()
-      val columns: Array[HostColumnVector] = new Array(numColumns)
-      val toClose = new ArrayBuffer[AutoCloseable]()
-      try {
-        var startRow = 0
-        val numRows = batch.numRows()
-        if (batch.numCols() > 0) {
-          val firstCol = batch.column(0)
-          if (firstCol.isInstanceOf[SlicedGpuColumnVector]) {
-            // We don't have control over ColumnarBatch to put in the slice, so we have to do it
-            // for each column.  In this case we are using the first column.
-            startRow = firstCol.asInstanceOf[SlicedGpuColumnVector].getStart
-            for (i <- 0 until numColumns) {
-              columns(i) = batch.column(i).asInstanceOf[SlicedGpuColumnVector].getBase
-            }
-          } else {
-            for (i <- 0 until numColumns) {
-              batch.column(i) match {
-                case gpu: GpuColumnVector =>
-                  val cpu = gpu.copyToHost()
-                  toClose += cpu
-                  columns(i) = cpu.getBase
-                case cpu: RapidsHostColumnVector =>
-                  columns(i) = cpu.getBase
+    private def serializeBatchOnCPU(batch: ColumnarBatch): Unit = {
+      val numCols = batch.numCols()
+      if (numCols > 0) {
+        withResource(new ArrayBuffer[AutoCloseable]()) { toClose =>
+          var startRow = 0
+          val toHostCol: SparkColumnVector => HostColumnVector = batch.column(0) match {
+            case sliced: SlicedGpuColumnVector =>
+              // We don't have control over ColumnarBatch to put in the slice, so we have
+              // to do it for each column.  In this case we are using the first column.
+              startRow = sliced.getStart
+              col => col.asInstanceOf[SlicedGpuColumnVector].getBase
+            case _: GpuColumnVector =>
+              col => {
+                val hCol = col.asInstanceOf[GpuColumnVector].copyToHost()
+                toClose += hCol
+                hCol.getBase
               }
-            }
+            case _: RapidsHostColumnVector =>
+              col => col.asInstanceOf[RapidsHostColumnVector].getBase
           }
-
-          dataSize += JCudfSerialization.getSerializedSizeInBytes(columns, startRow, numRows)
-          val range = new NvtxRange("Serialize Batch", NvtxColor.YELLOW)
-          try {
-            JCudfSerialization.writeToStream(columns, dOut, startRow, numRows)
-          } finally {
-            range.close()
-          }
-        } else {
-          val range = new NvtxRange("Serialize Row Only Batch", NvtxColor.YELLOW)
-          try {
-            JCudfSerialization.writeRowsToStream(dOut, numRows)
-          } finally {
-            range.close()
+          val cols = (0 until numCols).map(i => toHostCol(batch.column(i))).toArray
+          withResource(new NvtxRange("Serialize Batch", NvtxColor.YELLOW)) { _ =>
+            dataSize += JCudfSerialization.writeToStream(cols, dOut, startRow, batch.numRows())
           }
         }
-      } finally {
-        toClose.safeClose()
+      } else { // Rows only batch
+        withResource(new NvtxRange("Serialize Row Only Batch", NvtxColor.YELLOW)) { _ =>
+          JCudfSerialization.writeRowsToStream(dOut, batch.numRows())
+        }
       }
+    }
+
+    private def serializeBatchOnGPU(batch: ColumnarBatch): Unit = {
+      if (batch.numCols() > 0) {
+        batch.column(0) match {
+          case packTable: GpuPackedTableColumn =>
+            withResource(new NvtxRange("Serialize Table", NvtxColor.YELLOW)) { _ =>
+              dataSize += tableSerializer.writeToStream(packTable.getContiguousTable, dOut)
+            }
+          case o => throw new IllegalArgumentException(
+            s"Table with '${o.getClass.getSimpleName}' columns is not supported")
+        }
+      } else {
+        withResource(new NvtxRange("Serialize Rows Only Table", NvtxColor.YELLOW)) { _ =>
+          dataSize += tableSerializer.writeRowsOnlyToStream(batch.numRows(), dOut)
+        }
+      }
+    }
+
+    private lazy val serializeBatch: ColumnarBatch => Unit = if (serializingOnGpu) {
+      serializeBatchOnGPU
+    } else {
+      serializeBatchOnCPU
+    }
+
+    override def writeValue[T: ClassTag](value: T): SerializationStream = {
+      serializeBatch(value.asInstanceOf[ColumnarBatch])
       this
     }
 
@@ -220,7 +233,11 @@ private class GpuColumnarBatchSerializerInstance(dataSize: GpuMetric) extends Se
       private[this] val dIn: DataInputStream = new DataInputStream(new BufferedInputStream(in))
 
       override def asKeyValueIterator: Iterator[(Int, ColumnarBatch)] = {
-        new SerializedBatchIterator(dIn)
+        if (serializingOnGpu) {
+          new SerializedTableIterator(dIn, tableSerializer)
+        } else {
+          new SerializedBatchIterator(dIn)
+        }
       }
 
       override def asIterator: Iterator[Any] = {
@@ -256,6 +273,189 @@ private class GpuColumnarBatchSerializerInstance(dataSize: GpuMetric) extends Se
     throw new UnsupportedOperationException
   override def deserialize[T: ClassTag](bytes: ByteBuffer, loader: ClassLoader): T =
     throw new UnsupportedOperationException
+}
+
+private[rapids] class SimpleTableSerializer(sparkTypes: Array[DataType]) {
+
+  private val P_MAGIC_CUDF: Int = 0x43554446
+  private val headerLen = 4 // the size in bytes of an Int
+  private val tmpBuf = new Array[Byte](1024 * 64) // 64k
+
+  private def writeByteBufferToStream(bBuf: ByteBuffer, dOut: DataOutputStream): Unit = {
+    // Write the buffer size first
+    val bufLen = bBuf.capacity()
+    dOut.writeLong(bufLen.toLong)
+    if (bBuf.hasArray) {
+      dOut.write(bBuf.array())
+    } else { // Probably a direct buffer
+      var leftLen = bufLen
+      while (leftLen > 0) {
+        val copyLen = Math.min(tmpBuf.length, leftLen)
+        bBuf.get(tmpBuf, 0, copyLen)
+        dOut.write(tmpBuf, 0, copyLen)
+        leftLen -= copyLen
+      }
+    }
+  }
+
+  private def writeHostBufferToStream(hBuf: HostMemoryBuffer, dOut: DataOutputStream): Unit = {
+    // Write the buffer size first
+    val bufLen = hBuf.getLength
+    dOut.writeLong(bufLen)
+    var leftLen = bufLen
+    var hOffset = 0L
+    while (leftLen > 0L) {
+      val copyLen = Math.min(tmpBuf.length, leftLen)
+      hBuf.getBytes(tmpBuf, 0, hOffset, copyLen)
+      dOut.write(tmpBuf, 0, copyLen.toInt)
+      leftLen -= copyLen
+      hOffset += copyLen
+    }
+  }
+
+  private def writeProtocolHeader(dOut: DataOutputStream): Unit = {
+    dOut.writeInt(P_MAGIC_CUDF)
+  }
+
+  def writeRowsOnlyToStream(numRows: Int, dOut: DataOutputStream): Long = {
+    // 1) header
+    writeProtocolHeader(dOut)
+    // 2) metadata fo an empty batch
+    val degenBatch = new ColumnarBatch(Array.empty, numRows)
+    val tableMetaBuf = MetaUtils.buildDegenerateTableMeta(degenBatch).getByteBuffer
+    writeByteBufferToStream(tableMetaBuf, dOut)
+    headerLen + tableMetaBuf.capacity()
+  }
+
+  def writeToStream(table: ContiguousTable, dOut: DataOutputStream): Long = {
+    // 1) header, now only a magic number, may add more as needed
+    writeProtocolHeader(dOut)
+    // 2) table metadata,
+    val tableMetaBuf = MetaUtils.buildTableMeta(0, table).getByteBuffer
+    writeByteBufferToStream(tableMetaBuf, dOut)
+    // 3) table data, it is already serializable by the upstream process.
+    val dataDevBuf = table.getBuffer
+    withResource(HostMemoryBuffer.allocate(dataDevBuf.getLength)) { hostBuf =>
+      hostBuf.copyFromDeviceBuffer(dataDevBuf)
+      writeHostBufferToStream(hostBuf, dOut)
+    }
+    headerLen + tableMetaBuf.capacity() + dataDevBuf.getLength
+  }
+
+  private def readProtocolHeader(dIn: DataInputStream): Unit = {
+    val num = dIn.readInt()
+    if (num != P_MAGIC_CUDF) {
+      throw new IllegalStateException(s"Expected magic number $P_MAGIC_CUDF for " +
+        s"table serializer, but got $num")
+    }
+  }
+
+  private def readByteBufferFromStream(dIn: DataInputStream): ByteBuffer = {
+    val bufLen = dIn.readLong()
+    val bufArray = new Array[Byte](bufLen.toInt)
+    val ret = dIn.read(bufArray)
+    if (ret < 0) {
+      throw new EOFException()
+    }
+    ByteBuffer.wrap(bufArray)
+  }
+
+  private def readHostBufferFromStream(dIn: DataInputStream): HostMemoryBuffer = {
+    val bufLen = dIn.readLong()
+    closeOnExcept(HostMemoryBuffer.allocate(bufLen)) { hostBuf =>
+      var leftLen = bufLen
+      var hOffset = 0L
+      while (leftLen > 0) {
+        val copyLen = Math.min(tmpBuf.length, leftLen)
+        val readLen = dIn.read(tmpBuf, 0, copyLen.toInt)
+        if (readLen < 0) {
+          throw new EOFException()
+        }
+        hostBuf.setBytes(hOffset, tmpBuf, 0, readLen)
+        hOffset += readLen
+        leftLen -= readLen
+      }
+      hostBuf
+    }
+  }
+
+  def readFromStream(dIn: DataInputStream): ColumnarBatch = {
+    // 1) read and check header
+    readProtocolHeader(dIn)
+    // 2) read table metadata
+    val tableMeta = TableMeta.getRootAsTableMeta(readByteBufferFromStream(dIn))
+    if (tableMeta.packedMetaAsByteBuffer() == null) {
+      // no packed metadata, must be a table with zero columns
+      new ColumnarBatch(Array.empty, tableMeta.rowCount().toInt)
+    } else {
+      // 3) read table data
+      val dataOnDev = withResource(readHostBufferFromStream(dIn)) { dataHostBuf =>
+        GpuSemaphore.acquireIfNecessary(TaskContext.get())
+        closeOnExcept(DeviceMemoryBuffer.allocate(dataHostBuf.getLength)) { dataDevBuf =>
+          dataDevBuf.copyFromHostBuffer(dataHostBuf)
+          dataDevBuf
+        }
+      }
+      val bufferMeta = tableMeta.bufferMeta()
+      if (bufferMeta == null || bufferMeta.codecBufferDescrsLength == 0) {
+        MetaUtils.getBatchFromMeta(dataOnDev, tableMeta, sparkTypes)
+      } else {
+        // Compressed table is not supported by the write side, but ok to
+        // put it here for the read side. Since compression will be supported later.
+        GpuCompressedColumnVector.from(dataOnDev, tableMeta)
+      }
+    }
+  }
+}
+
+private[rapids] class SerializedTableIterator(
+    dIn: DataInputStream,
+    tableSerializer: SimpleTableSerializer) extends Iterator[(Int, ColumnarBatch)] {
+
+  private var closed = false
+  private var onDeck: Option[SpillableColumnarBatch] = None
+  Option(TaskContext.get()).foreach { tc =>
+    onTaskCompletion(tc) {
+      onDeck.foreach(_.close())
+      onDeck = None
+      if (!closed) {
+        dIn.close()
+      }
+    }
+  }
+
+  override def hasNext: Boolean = {
+    if (onDeck.isEmpty) {
+      tryReadNextBatch()
+    }
+    onDeck.isDefined
+  }
+
+  override def next(): (Int, ColumnarBatch) = {
+    if (!hasNext) {
+      throw new NoSuchElementException()
+    }
+    val ret = withResource(onDeck) { _ =>
+      onDeck.get.getColumnarBatch()
+    }
+    onDeck = None
+    (0, ret)
+  }
+
+  private def tryReadNextBatch(): Unit = {
+    if (closed) {
+      return
+    }
+    try {
+      onDeck = Some(SpillableColumnarBatch(tableSerializer.readFromStream(dIn),
+        SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
+    } catch {
+      case _: EOFException => // we reach the end
+        dIn.close()
+        closed = true
+        onDeck = None
+    }
+  }
 }
 
 /**

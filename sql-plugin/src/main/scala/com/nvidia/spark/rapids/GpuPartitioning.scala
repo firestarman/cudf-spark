@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,11 +35,13 @@ object GpuPartitioning {
 }
 
 trait GpuPartitioning extends Partitioning {
-  private[this] val (maxCompressionBatchSize, _useGPUShuffle, _useMultiThreadedShuffle) = {
+  private[this] val (maxCompressionBatchSize, _useGPUShuffle, _useMultiThreadedShuffle,
+      _serializingOnGPU) = {
     val rapidsConf = new RapidsConf(SQLConf.get)
     (rapidsConf.shuffleCompressionMaxBatchMemory,
       GpuShuffleEnv.useGPUShuffle(rapidsConf),
-      GpuShuffleEnv.useMultiThreadedShuffle(rapidsConf))
+      GpuShuffleEnv.useMultiThreadedShuffle(rapidsConf),
+      GpuShuffleEnv.serializingOnGpu(rapidsConf))
   }
 
   final def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
@@ -50,6 +52,8 @@ trait GpuPartitioning extends Partitioning {
   def usesGPUShuffle: Boolean = _useGPUShuffle
 
   def usesMultiThreadedShuffle: Boolean = _useMultiThreadedShuffle
+
+  def serializingOnGPU: Boolean = _serializingOnGPU
 
   def sliceBatch(vectors: Array[RapidsHostColumnVector], start: Int, end: Int): ColumnarBatch = {
     var ret: ColumnarBatch = null
@@ -175,7 +179,7 @@ trait GpuPartitioning extends Partitioning {
 
   def sliceInternalGpuOrCpuAndClose(numRows: Int, partitionIndexes: Array[Int],
       partitionColumns: Array[GpuColumnVector]): Array[(ColumnarBatch, Int)] = {
-    val sliceOnGpu = usesGPUShuffle
+    val sliceOnGpu = usesGPUShuffle || _serializingOnGPU
     val nvtxRangeKey = if (sliceOnGpu) {
       "sliceInternalOnGpu"
     } else {

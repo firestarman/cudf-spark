@@ -144,7 +144,8 @@ object GpuShuffleEnv extends Logging {
   def serializingOnGpu(conf: RapidsConf): Boolean = {
     // Serializing on GPU for CPU shuffle does not support compression yet.
     conf.isSerializingOnGpu &&
-      conf.shuffleCompressionCodec.toLowerCase(Locale.ROOT) == "none"
+      conf.shuffleCompressionCodec.toLowerCase(Locale.ROOT) == "none" &&
+      (!useGPUShuffle(conf))
   }
 
   def getCatalog: ShuffleBufferCatalog = if (env == null) {

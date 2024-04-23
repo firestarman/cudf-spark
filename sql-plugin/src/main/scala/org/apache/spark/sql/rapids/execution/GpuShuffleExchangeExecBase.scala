@@ -183,13 +183,6 @@ abstract class GpuShuffleExchangeExecBase(
     }
   }
 
-  private lazy val serializingOnGPU = {
-    gpuOutputPartitioning match {
-      case gpuPartitioning: GpuPartitioning => gpuPartitioning.serializingOnGPU
-      case _ => false
-    }
-  }
-
   // Shuffle produces a lot of small output batches that should be coalesced together.
   // This coalesce occurs on the GPU and should always be done when using RAPIDS shuffle,
   // when it is under UCX or CACHE_ONLY modes.
@@ -238,7 +231,7 @@ abstract class GpuShuffleExchangeExecBase(
   // This value must be lazy because the child's output may not have been resolved
   // yet in all cases.
   private lazy val serializer: Serializer = new GpuColumnarBatchSerializer(
-    gpuLongMetric("dataSize"), serializingOnGPU, sparkTypes)
+    gpuLongMetric("dataSize"), gpuOutputPartitioning.serializingOnGPU, sparkTypes)
 
   @transient lazy val inputBatchRDD: RDD[ColumnarBatch] = child.executeColumnar()
 

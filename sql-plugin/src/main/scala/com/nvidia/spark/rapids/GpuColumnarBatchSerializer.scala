@@ -29,6 +29,7 @@ import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 import com.nvidia.spark.rapids.format.TableMeta
 
 import org.apache.spark.TaskContext
+import org.apache.spark.internal.Logging
 import org.apache.spark.serializer.{DeserializationStream, SerializationStream, Serializer, SerializerInstance}
 import org.apache.spark.sql.types.{DataType, NullType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
@@ -124,24 +125,25 @@ class SerializedBatchIterator(dIn: DataInputStream) extends Iterator[(Int, Colum
  *
  * @note The RAPIDS shuffle does not use this code.
  */
-class GpuColumnarBatchSerializer(dataSize: GpuMetric, serializingOnGpu: Boolean = false,
+class GpuColumnarBatchSerializer(dataSize: GpuMetric, isSerializedTable: Boolean = false,
     sparkTypes: Array[DataType] = Array.empty) extends Serializer with Serializable {
   override def newInstance(): SerializerInstance =
-    new GpuColumnarBatchSerializerInstance(dataSize, serializingOnGpu, sparkTypes)
+    new GpuColumnarBatchSerializerInstance(dataSize, isSerializedTable, sparkTypes)
   override def supportsRelocationOfSerializedObjects: Boolean = true
 }
 
 private class GpuColumnarBatchSerializerInstance(
     dataSize: GpuMetric,
-    serializingOnGpu: Boolean,
+    isSerializedTable: Boolean,
     sparkTypes: Array[DataType]) extends SerializerInstance {
 
   private lazy val tableSerializer = new SimpleTableSerializer(sparkTypes)
 
-  override def serializeStream(out: OutputStream): SerializationStream = new SerializationStream {
+  override def serializeStream(out: OutputStream): SerializationStream = new SerializationStream
+      with Logging {
     private[this] val dOut = new DataOutputStream(new BufferedOutputStream(out))
 
-    private def serializeBatchOnCPU(batch: ColumnarBatch): Unit = {
+    private def serializeCpuBatch(batch: ColumnarBatch): Unit = {
       val numCols = batch.numCols()
       if (numCols > 0) {
         withResource(new ArrayBuffer[AutoCloseable]()) { toClose =>
@@ -173,7 +175,7 @@ private class GpuColumnarBatchSerializerInstance(
       }
     }
 
-    private def serializeBatchOnGPU(batch: ColumnarBatch): Unit = {
+    private def serializeGpuBatch(batch: ColumnarBatch): Unit = {
       if (batch.numCols() > 0) {
         batch.column(0) match {
           case packTable: GpuPackedTableColumn =>
@@ -190,10 +192,11 @@ private class GpuColumnarBatchSerializerInstance(
       }
     }
 
-    private lazy val serializeBatch: ColumnarBatch => Unit = if (serializingOnGpu) {
-      serializeBatchOnGPU
+    private lazy val serializeBatch: ColumnarBatch => Unit = if (isSerializedTable) {
+      logInfo("Serializing Table is enabled")
+      serializeGpuBatch
     } else {
-      serializeBatchOnCPU
+      serializeCpuBatch
     }
 
     override def writeValue[T: ClassTag](value: T): SerializationStream = {
@@ -233,7 +236,7 @@ private class GpuColumnarBatchSerializerInstance(
       private[this] val dIn: DataInputStream = new DataInputStream(new BufferedInputStream(in))
 
       override def asKeyValueIterator: Iterator[(Int, ColumnarBatch)] = {
-        if (serializingOnGpu) {
+        if (isSerializedTable) {
           new SerializedTableIterator(dIn, tableSerializer)
         } else {
           new SerializedBatchIterator(dIn)
@@ -278,7 +281,8 @@ private class GpuColumnarBatchSerializerInstance(
 private[rapids] class SimpleTableSerializer(sparkTypes: Array[DataType]) {
 
   private val P_MAGIC_CUDF: Int = 0x43554446
-  private val headerLen = 4 // the size in bytes of an Int
+  private val P_VERSION: Int = 0
+  private val headerLen = 8 // the size in bytes of two Ints for a header
   private val tmpBuf = new Array[Byte](1024 * 64) // 64k
 
   private def writeByteBufferToStream(bBuf: ByteBuffer, dOut: DataOutputStream): Unit = {
@@ -315,6 +319,7 @@ private[rapids] class SimpleTableSerializer(sparkTypes: Array[DataType]) {
 
   private def writeProtocolHeader(dOut: DataOutputStream): Unit = {
     dOut.writeInt(P_MAGIC_CUDF)
+    dOut.writeInt(P_VERSION)
   }
 
   def writeRowsOnlyToStream(numRows: Int, dOut: DataOutputStream): Long = {
@@ -328,7 +333,7 @@ private[rapids] class SimpleTableSerializer(sparkTypes: Array[DataType]) {
   }
 
   def writeToStream(table: ContiguousTable, dOut: DataOutputStream): Long = {
-    // 1) header, now only a magic number, may add more as needed
+    // 1) header
     writeProtocolHeader(dOut)
     // 2) table metadata,
     val tableMetaBuf = MetaUtils.buildTableMeta(0, table).getByteBuffer
@@ -343,20 +348,31 @@ private[rapids] class SimpleTableSerializer(sparkTypes: Array[DataType]) {
   }
 
   private def readProtocolHeader(dIn: DataInputStream): Unit = {
-    val num = dIn.readInt()
-    if (num != P_MAGIC_CUDF) {
+    val magicNum = dIn.readInt()
+    if (magicNum != P_MAGIC_CUDF) {
       throw new IllegalStateException(s"Expected magic number $P_MAGIC_CUDF for " +
-        s"table serializer, but got $num")
+        s"table serializer, but got $magicNum")
+    }
+    val version = dIn.readInt()
+    if (version != P_VERSION) {
+      throw new IllegalStateException(s"Version mismatch: expected $P_VERSION for " +
+        s"table serializer, but got $version")
     }
   }
 
   private def readByteBufferFromStream(dIn: DataInputStream): ByteBuffer = {
-    val bufLen = dIn.readLong()
-    val bufArray = new Array[Byte](bufLen.toInt)
-    val ret = dIn.read(bufArray)
-    if (ret < 0) {
-      throw new EOFException()
-    }
+    val bufLen = dIn.readLong().toInt
+    val bufArray = new Array[Byte](bufLen)
+    var readLen = 0
+    // A single call to read(bufArray) can not always read the expected length. So
+    // we do it here ourselves.
+    do {
+      val ret = dIn.read(bufArray, readLen, bufLen - readLen)
+      if (ret < 0) {
+        throw new EOFException()
+      }
+      readLen += ret
+    } while (readLen < bufLen)
     ByteBuffer.wrap(bufArray)
   }
 
@@ -384,25 +400,30 @@ private[rapids] class SimpleTableSerializer(sparkTypes: Array[DataType]) {
     readProtocolHeader(dIn)
     // 2) read table metadata
     val tableMeta = TableMeta.getRootAsTableMeta(readByteBufferFromStream(dIn))
+    // Acquiring the GPU regardless of whether the coming batch is empty or not,
+    // because the downstream tasks expect the GPU batch producer to acquire the
+    // semaphore and may generate GPU data from batches that are empty.
+    GpuSemaphore.acquireIfNecessary(TaskContext.get())
     if (tableMeta.packedMetaAsByteBuffer() == null) {
       // no packed metadata, must be a table with zero columns
       new ColumnarBatch(Array.empty, tableMeta.rowCount().toInt)
     } else {
       // 3) read table data
       val dataOnDev = withResource(readHostBufferFromStream(dIn)) { dataHostBuf =>
-        GpuSemaphore.acquireIfNecessary(TaskContext.get())
         closeOnExcept(DeviceMemoryBuffer.allocate(dataHostBuf.getLength)) { dataDevBuf =>
           dataDevBuf.copyFromHostBuffer(dataHostBuf)
           dataDevBuf
         }
       }
-      val bufferMeta = tableMeta.bufferMeta()
-      if (bufferMeta == null || bufferMeta.codecBufferDescrsLength == 0) {
-        MetaUtils.getBatchFromMeta(dataOnDev, tableMeta, sparkTypes)
-      } else {
-        // Compressed table is not supported by the write side, but ok to
-        // put it here for the read side. Since compression will be supported later.
-        GpuCompressedColumnVector.from(dataOnDev, tableMeta)
+      withResource(dataOnDev) { _ =>
+        val bufferMeta = tableMeta.bufferMeta()
+        if (bufferMeta == null || bufferMeta.codecBufferDescrsLength == 0) {
+          MetaUtils.getBatchFromMeta(dataOnDev, tableMeta, sparkTypes)
+        } else {
+          // Compressed table is not supported by the write side, but ok to
+          // put it here for the read side. Since compression will be supported later.
+          GpuCompressedColumnVector.from(dataOnDev, tableMeta)
+        }
       }
     }
   }
@@ -453,6 +474,7 @@ private[rapids] class SerializedTableIterator(
       case _: EOFException => // we reach the end
         dIn.close()
         closed = true
+        onDeck.foreach(_.close())
         onDeck = None
     }
   }

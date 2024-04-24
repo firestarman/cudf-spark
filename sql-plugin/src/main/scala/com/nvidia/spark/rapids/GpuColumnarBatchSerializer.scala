@@ -282,7 +282,7 @@ private class GpuColumnarBatchSerializerInstance(
 
 private[rapids] class SimpleTableSerializer(sparkTypes: Array[DataType]) {
 
-  private val P_MAGIC_CUDF: Int = 0x43554446
+  private val P_MAGIC_NUM: Int = 0x43554447
   private val P_VERSION: Int = 0
   private val headerLen = 8 // the size in bytes of two Ints for a header
   private val tmpBuf = new Array[Byte](1024 * 64) // 64k
@@ -320,7 +320,7 @@ private[rapids] class SimpleTableSerializer(sparkTypes: Array[DataType]) {
   }
 
   private def writeProtocolHeader(dOut: DataOutputStream): Unit = {
-    dOut.writeInt(P_MAGIC_CUDF)
+    dOut.writeInt(P_MAGIC_NUM)
     dOut.writeInt(P_VERSION)
   }
 
@@ -351,8 +351,8 @@ private[rapids] class SimpleTableSerializer(sparkTypes: Array[DataType]) {
 
   private def readProtocolHeader(dIn: DataInputStream): Unit = {
     val magicNum = dIn.readInt()
-    if (magicNum != P_MAGIC_CUDF) {
-      throw new IllegalStateException(s"Expected magic number $P_MAGIC_CUDF for " +
+    if (magicNum != P_MAGIC_NUM) {
+      throw new IllegalStateException(s"Expected magic number $P_MAGIC_NUM for " +
         s"table serializer, but got $magicNum")
     }
     val version = dIn.readInt()

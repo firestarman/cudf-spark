@@ -144,6 +144,7 @@ private class GpuColumnarBatchSerializerInstance(
     private[this] val dOut = new DataOutputStream(new BufferedOutputStream(out))
 
     private def serializeCpuBatch(batch: ColumnarBatch): Unit = {
+      val numRows = batch.numRows()
       val numCols = batch.numCols()
       if (numCols > 0) {
         withResource(new ArrayBuffer[AutoCloseable]()) { toClose =>
@@ -164,13 +165,14 @@ private class GpuColumnarBatchSerializerInstance(
               col => col.asInstanceOf[RapidsHostColumnVector].getBase
           }
           val cols = (0 until numCols).map(i => toHostCol(batch.column(i))).toArray
+          dataSize += JCudfSerialization.getSerializedSizeInBytes(cols, startRow, numRows)
           withResource(new NvtxRange("Serialize Batch", NvtxColor.YELLOW)) { _ =>
-            dataSize += JCudfSerialization.writeToStream(cols, dOut, startRow, batch.numRows())
+            JCudfSerialization.writeToStream(cols, dOut, startRow, numRows)
           }
         }
       } else { // Rows only batch
         withResource(new NvtxRange("Serialize Row Only Batch", NvtxColor.YELLOW)) { _ =>
-          JCudfSerialization.writeRowsToStream(dOut, batch.numRows())
+          JCudfSerialization.writeRowsToStream(dOut, numRows)
         }
       }
     }

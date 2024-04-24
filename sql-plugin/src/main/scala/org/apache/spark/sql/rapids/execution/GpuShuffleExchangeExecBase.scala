@@ -199,15 +199,17 @@ abstract class GpuShuffleExchangeExecBase(
     "dataSize" -> createSizeMetric(ESSENTIAL_LEVEL,"data size"),
     "dataReadSize" -> createSizeMetric(MODERATE_LEVEL, "data read size"),
     "rapidsShuffleSerializationTime" ->
-        createNanoTimingMetric(DEBUG_LEVEL,"rs. serialization time"),
+        createNanoTimingMetric(MODERATE_LEVEL,"rs. serialization time"),
     "rapidsShuffleDeserializationTime" ->
-        createNanoTimingMetric(DEBUG_LEVEL,"rs. deserialization time"),
+        createNanoTimingMetric(MODERATE_LEVEL,"rs. deserialization time"),
     "rapidsShuffleWriteTime" ->
         createNanoTimingMetric(ESSENTIAL_LEVEL,"rs. shuffle write time"),
     "rapidsShuffleCombineTime" ->
         createNanoTimingMetric(DEBUG_LEVEL,"rs. shuffle combine time"),
     "rapidsShuffleWriteIoTime" ->
         createNanoTimingMetric(DEBUG_LEVEL,"rs. shuffle write io time"),
+    "rapidsShufflePartitionTime" ->
+      createNanoTimingMetric(MODERATE_LEVEL, "rs. shuffle partition time"),
     "rapidsShuffleReadTime" ->
         createNanoTimingMetric(ESSENTIAL_LEVEL,"rs. shuffle read time")
   ) ++ GpuMetric.wrap(readMetrics) ++ GpuMetric.wrap(writeMetrics)
@@ -231,7 +233,10 @@ abstract class GpuShuffleExchangeExecBase(
   // This value must be lazy because the child's output may not have been resolved
   // yet in all cases.
   private lazy val serializer: Serializer = new GpuColumnarBatchSerializer(
-    gpuLongMetric("dataSize"), gpuOutputPartitioning.serializingOnGPU, sparkTypes)
+    gpuLongMetric("dataSize"), allMetrics("rapidsShuffleSerializationTime"),
+    allMetrics("rapidsShuffleDeserializationTime"),
+    gpuOutputPartitioning.serializingOnGPU, sparkTypes,
+    )
 
   @transient lazy val inputBatchRDD: RDD[ColumnarBatch] = child.executeColumnar()
 
@@ -314,7 +319,8 @@ object GpuShuffleExchangeExecBase {
     }
     val partitioner: GpuExpression = getPartitioner(newRdd, outputAttributes, newPartitioning)
     def getPartitioned: ColumnarBatch => Any = {
-      batch => partitioner.columnarEvalAny(batch)
+      val partitionMetric = metrics("rapidsShufflePartitionTime")
+      batch => partitionMetric.ns(partitioner.columnarEvalAny(batch))
     }
     val rddWithPartitionIds: RDD[Product2[Int, ColumnarBatch]] = {
       newRdd.mapPartitions { iter =>

@@ -125,19 +125,19 @@ class SerializedBatchIterator(dIn: DataInputStream) extends Iterator[(Int, Colum
  *
  * @note The RAPIDS shuffle does not use this code.
  */
-class GpuColumnarBatchSerializer(dataSize: GpuMetric, isSerializedTable: Boolean = false,
+class GpuColumnarBatchSerializer(dataSize: GpuMetric, serTime: GpuMetric = NoopMetric,
+    deserTime: GpuMetric = NoopMetric, isSerializedTable: Boolean = false,
     sparkTypes: Array[DataType] = Array.empty) extends Serializer with Serializable {
   override def newInstance(): SerializerInstance =
-    new GpuColumnarBatchSerializerInstance(dataSize, isSerializedTable, sparkTypes)
+    new GpuColumnarBatchSerializerInstance(dataSize, serTime, deserTime,
+      isSerializedTable, sparkTypes)
   override def supportsRelocationOfSerializedObjects: Boolean = true
 }
 
-private class GpuColumnarBatchSerializerInstance(
-    dataSize: GpuMetric,
-    isSerializedTable: Boolean,
-    sparkTypes: Array[DataType]) extends SerializerInstance {
-
-  private lazy val tableSerializer = new SimpleTableSerializer(sparkTypes)
+private class GpuColumnarBatchSerializerInstance(dataSize: GpuMetric, serTime: GpuMetric,
+    deserTime: GpuMetric, isSerializedTable: Boolean, sparkTypes: Array[DataType]
+) extends SerializerInstance {
+  private lazy val tableSerializer = new SimpleTableSerializer(sparkTypes, deserTime)
 
   override def serializeStream(out: OutputStream): SerializationStream = new SerializationStream
       with Logging {
@@ -181,28 +181,27 @@ private class GpuColumnarBatchSerializerInstance(
       if (batch.numCols() > 0) {
         batch.column(0) match {
           case packTable: GpuPackedTableColumn =>
-            withResource(new NvtxRange("Serialize Table", NvtxColor.YELLOW)) { _ =>
+            withResource(new NvtxRange("Serialize Table", NvtxColor.RED)) { _ =>
               dataSize += tableSerializer.writeToStream(packTable.getContiguousTable, dOut)
             }
           case o => throw new IllegalArgumentException(
             s"Table with '${o.getClass.getSimpleName}' columns is not supported")
         }
       } else {
-        withResource(new NvtxRange("Serialize Rows Only Table", NvtxColor.YELLOW)) { _ =>
+        withResource(new NvtxRange("Serialize Rows Only Table", NvtxColor.RED)) { _ =>
           dataSize += tableSerializer.writeRowsOnlyToStream(batch.numRows(), dOut)
         }
       }
     }
 
     private lazy val serializeBatch: ColumnarBatch => Unit = if (isSerializedTable) {
-      logInfo("Serializing Table is enabled")
       serializeGpuBatch
     } else {
       serializeCpuBatch
     }
 
     override def writeValue[T: ClassTag](value: T): SerializationStream = {
-      serializeBatch(value.asInstanceOf[ColumnarBatch])
+      serTime.ns(serializeBatch(value.asInstanceOf[ColumnarBatch]))
       this
     }
 
@@ -280,7 +279,7 @@ private class GpuColumnarBatchSerializerInstance(
     throw new UnsupportedOperationException
 }
 
-private[rapids] class SimpleTableSerializer(sparkTypes: Array[DataType]) {
+private[rapids] class SimpleTableSerializer(sparkTypes: Array[DataType], deserTime: GpuMetric) {
 
   private val P_MAGIC_NUM: Int = 0x43554447
   private val P_VERSION: Int = 0
@@ -406,25 +405,31 @@ private[rapids] class SimpleTableSerializer(sparkTypes: Array[DataType]) {
     // because the downstream tasks expect the GPU batch producer to acquire the
     // semaphore and may generate GPU data from batches that are empty.
     GpuSemaphore.acquireIfNecessary(TaskContext.get())
-    if (tableMeta.packedMetaAsByteBuffer() == null) {
-      // no packed metadata, must be a table with zero columns
-      new ColumnarBatch(Array.empty, tableMeta.rowCount().toInt)
-    } else {
-      // 3) read table data
-      val dataOnDev = withResource(readHostBufferFromStream(dIn)) { dataHostBuf =>
-        closeOnExcept(DeviceMemoryBuffer.allocate(dataHostBuf.getLength)) { dataDevBuf =>
-          dataDevBuf.copyFromHostBuffer(dataHostBuf)
-          dataDevBuf
+    deserTime.ns {
+      if (tableMeta.packedMetaAsByteBuffer() == null) {
+        // no packed metadata, must be a table with zero columns
+        new ColumnarBatch(Array.empty, tableMeta.rowCount().toInt)
+      } else {
+        // 3) read table data
+        val data = withResource(new NvtxRange("Shuffle Buffering", NvtxColor.RED)) { _ =>
+          withResource(readHostBufferFromStream(dIn)) { dataHostBuf =>
+            closeOnExcept(DeviceMemoryBuffer.allocate(dataHostBuf.getLength)) { dataDevBuf =>
+              dataDevBuf.copyFromHostBuffer(dataHostBuf)
+              dataDevBuf
+            }
+          }
         }
-      }
-      withResource(dataOnDev) { _ =>
-        val bufferMeta = tableMeta.bufferMeta()
-        if (bufferMeta == null || bufferMeta.codecBufferDescrsLength == 0) {
-          MetaUtils.getBatchFromMeta(dataOnDev, tableMeta, sparkTypes)
-        } else {
-          // Compressed table is not supported by the write side, but ok to
-          // put it here for the read side. Since compression will be supported later.
-          GpuCompressedColumnVector.from(dataOnDev, tableMeta)
+        withResource(new NvtxRange("Shuffle Deserialization", NvtxColor.YELLOW)) { _ =>
+          withResource(data) { _ =>
+            val bufferMeta = tableMeta.bufferMeta()
+            if (bufferMeta == null || bufferMeta.codecBufferDescrsLength == 0) {
+              MetaUtils.getBatchFromMeta(data, tableMeta, sparkTypes)
+            } else {
+              // Compressed table is not supported by the write side, but ok to
+              // put it here for the read side. Since compression will be supported later.
+              GpuCompressedColumnVector.from(data, tableMeta)
+            }
+          }
         }
       }
     }

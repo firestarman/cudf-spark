@@ -34,7 +34,8 @@ import org.apache.spark.serializer.{DeserializationStream, SerializationStream, 
 import org.apache.spark.sql.types.{DataType, NullType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
 
-class SerializedBatchIterator(dIn: DataInputStream) extends Iterator[(Int, ColumnarBatch)] {
+class SerializedBatchIterator(dIn: DataInputStream, deserTime: GpuMetric
+) extends Iterator[(Int, ColumnarBatch)] {
   private[this] var nextHeader: Option[SerializedTableHeader] = None
   private[this] var toBeReturned: Option[ColumnarBatch] = None
   private[this] var streamClosed: Boolean = false
@@ -90,14 +91,14 @@ class SerializedBatchIterator(dIn: DataInputStream) extends Iterator[(Int, Colum
   }
 
   override def hasNext: Boolean = {
-    tryReadNextHeader()
+    deserTime.ns(tryReadNextHeader())
     nextHeader.isDefined
   }
 
   override def next(): (Int, ColumnarBatch) = {
     if (toBeReturned.isEmpty) {
       tryReadNextHeader()
-      toBeReturned = tryReadNext()
+      toBeReturned = deserTime.ns(tryReadNext())
       if (nextHeader.isEmpty || toBeReturned.isEmpty) {
         throw new NoSuchElementException("Walked off of the end...")
       }
@@ -254,7 +255,7 @@ private class GpuColumnarBatchSerializerInstance(dataSize: GpuMetric, serTime: G
         if (isSerializedTable) {
           new SerializedTableIterator(dIn, sparkTypes, deserTime)
         } else {
-          new SerializedBatchIterator(dIn)
+          new SerializedBatchIterator(dIn, deserTime)
         }
       }
 

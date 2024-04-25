@@ -21,9 +21,10 @@ import scala.concurrent.Future
 
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
+import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 import com.nvidia.spark.rapids.shims.{GpuHashPartitioning, GpuRangePartitioning, ShimUnaryExecNode, ShuffleOriginUtil, SparkShimImpl}
 
-import org.apache.spark.{MapOutputStatistics, ShuffleDependency}
+import org.apache.spark.{MapOutputStatistics, ShuffleDependency, TaskContext}
 import org.apache.spark.rapids.shims.GpuShuffleExchangeExec
 import org.apache.spark.rdd.RDD
 import org.apache.spark.serializer.Serializer
@@ -329,12 +330,17 @@ object GpuShuffleExchangeExecBase {
           private var partitioned : Array[(ColumnarBatch, Int)] = _
           private var at = 0
           private val mutablePair = new MutablePair[Int, ColumnarBatch]()
-          private def partNextBatch(): Unit = {
-            if (partitioned != null) {
-              partitioned.map(_._1).safeClose()
-              partitioned = null
-              at = 0
+          Option(TaskContext.get()).foreach { tc =>
+            onTaskCompletion(tc) {
+              if (partitioned != null) {
+                partitioned.drop(at).map(_._1).safeClose()
+              }
             }
+          }
+
+          private def partNextBatch(): Unit = {
+            partitioned = null
+            at = 0
             if (iter.hasNext) {
               var batch = iter.next()
               while (batch.numRows == 0 && iter.hasNext) {
@@ -349,7 +355,6 @@ object GpuShuffleExchangeExecBase {
                   metrics(GpuMetric.NUM_OUTPUT_ROWS) += batches._1.numRows()
                 })
                 metrics(GpuMetric.NUM_OUTPUT_BATCHES) += partitioned.length
-                at = 0
               } else {
                 batch.close()
               }
@@ -365,10 +370,7 @@ object GpuShuffleExchangeExecBase {
           }
 
           override def next(): Product2[Int, ColumnarBatch] = {
-            if (partitioned == null || at >= partitioned.length) {
-              partNextBatch()
-            }
-            if (partitioned == null || at >= partitioned.length) {
+            if (!hasNext) {
               throw new NoSuchElementException("Walked off of the end...")
             }
             val tup = partitioned(at)

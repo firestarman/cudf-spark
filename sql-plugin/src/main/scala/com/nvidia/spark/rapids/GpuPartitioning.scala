@@ -68,7 +68,7 @@ trait GpuPartitioning extends Partitioning {
   def sliceInternalOnGpuAndClose(numRows: Int, partitionIndexes: Array[Int],
       partitionColumns: Array[GpuColumnVector]): Array[ColumnarBatch] = {
     // The first index will always be 0, so we need to skip it.
-    val batches = if (numRows > 0) {
+    if (numRows > 0) {
       val parts = partitionIndexes.slice(1, partitionIndexes.length)
       closeOnExcept(new ArrayBuffer[ColumnarBatch](numPartitions)) { splits =>
         val contiguousTables = withResource(partitionColumns) { _ =>
@@ -94,9 +94,6 @@ trait GpuPartitioning extends Partitioning {
     } else {
       Array[ColumnarBatch]()
     }
-
-    GpuSemaphore.releaseIfNecessary(TaskContext.get())
-    batches
   }
 
   private def reslice(batch: ColumnarBatch, numSlices: Int): Seq[ColumnarBatch] = {

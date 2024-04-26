@@ -55,6 +55,30 @@ trait GpuPartitioning extends Partitioning {
 
   def serializingOnGPU: Boolean = _serializingOnGPU
 
+  private lazy val toPackedBatch: ContiguousTable => ColumnarBatch =
+    if (_serializingOnGPU) {
+      table =>
+        withResource(new NvtxRange("Table to Host", NvtxColor.BLUE)) { _ =>
+          withResource(table) { _ =>
+            PackedTableHostColumnVector.from(table)
+          }
+        }
+    } else {
+      GpuPackedTableColumn.from
+    }
+
+  private lazy val toCompressedBatch: CompressedTable => ColumnarBatch =
+    if (_serializingOnGPU) {
+      table =>
+        withResource(new NvtxRange("Table to Host", NvtxColor.BLUE)) { _ =>
+          withResource(table) { _ =>
+            PackedTableHostColumnVector.from(table)
+          }
+        }
+    } else {
+      GpuCompressedColumnVector.from
+    }
+
   def sliceBatch(vectors: Array[RapidsHostColumnVector], start: Int, end: Int): ColumnarBatch = {
     var ret: ColumnarBatch = null
     val count = end - start
@@ -80,15 +104,19 @@ trait GpuPartitioning extends Partitioning {
           case Some(codec) =>
             compressSplits(splits, codec, contiguousTables)
           case None =>
-            // GpuPackedTableColumn takes ownership of the contiguous tables
-            closeOnExcept(contiguousTables) { cts =>
-              cts.foreach { ct => splits.append(GpuPackedTableColumn.from(ct)) }
-            }
+            // ColumnarBatch takes ownership of the contiguous tables
+            closeOnExcept(contiguousTables)(_.foreach(ct => splits.append(toPackedBatch(ct))))
         }
+
         // synchronize our stream to ensure we have caught up with contiguous split
         // as downstream consumers (RapidsShuffleManager) will add hundreds of buffers
         // to the spill framework, this makes it so here we synchronize once.
         Cuda.DEFAULT_STREAM.sync()
+
+        if (_serializingOnGPU) {
+          // All the data should be on host now for shuffle, leaving GPU for a while.
+          GpuSemaphore.releaseIfNecessary(TaskContext.get())
+        }
         splits.toArray
       }
     } else {
@@ -213,7 +241,7 @@ trait GpuPartitioning extends Partitioning {
       // add each table either to the batch to be compressed or to the empty batch tracker
       contiguousTables.zipWithIndex.foreach { case (ct, i) =>
         if (ct.getRowCount == 0) {
-          emptyBatches.append((GpuPackedTableColumn.from(ct), i))
+          emptyBatches.append((toPackedBatch(ct), i))
         } else {
           compressor.addTableToCompress(ct)
         }
@@ -227,18 +255,15 @@ trait GpuPartitioning extends Partitioning {
           // add any compressed batches that need to appear before the next empty batch
           val numCompressedToAdd = emptyOutputIndex - outputIndex
           (0 until numCompressedToAdd).foreach { _ =>
-            val compressedTable = compressedTables(compressedTableIndex)
-            outputBatches.append(GpuCompressedColumnVector.from(compressedTable))
+            outputBatches.append(toCompressedBatch(compressedTables(compressedTableIndex)))
             compressedTableIndex += 1
           }
           outputBatches.append(emptyBatch)
           outputIndex = emptyOutputIndex + 1
         }
-
         // add any compressed batches that remain after the last empty batch
         (compressedTableIndex until compressedTables.length).foreach { i =>
-          val ct = compressedTables(i)
-          outputBatches.append(GpuCompressedColumnVector.from(ct))
+          outputBatches.append(toCompressedBatch(compressedTables(i)))
         }
       }
     }

@@ -22,7 +22,7 @@ import java.nio.ByteBuffer
 import scala.collection.mutable.ArrayBuffer
 import scala.reflect.ClassTag
 
-import ai.rapids.cudf.{ContiguousTable, DeviceMemoryBuffer, HostColumnVector, HostMemoryBuffer, JCudfSerialization, NvtxColor, NvtxRange}
+import ai.rapids.cudf.{DeviceMemoryBuffer, HostColumnVector, HostMemoryBuffer, JCudfSerialization, NvtxColor, NvtxRange}
 import ai.rapids.cudf.JCudfSerialization.SerializedTableHeader
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
@@ -97,8 +97,10 @@ class SerializedBatchIterator(dIn: DataInputStream, deserTime: GpuMetric
 
   override def next(): (Int, ColumnarBatch) = {
     if (toBeReturned.isEmpty) {
-      tryReadNextHeader()
-      toBeReturned = deserTime.ns(tryReadNext())
+      deserTime.ns {
+        tryReadNextHeader()
+        toBeReturned = tryReadNext()
+      }
       if (nextHeader.isEmpty || toBeReturned.isEmpty) {
         throw new NoSuchElementException("Walked off of the end...")
       }
@@ -145,14 +147,14 @@ private class GpuColumnarBatchSerializerInstance(dataSize: GpuMetric, serTime: G
     private[this] val tableSerializer = new SimpleTableSerializer()
     onTaskCompletion(TaskContext.get())(tableSerializer.close())
 
-    private lazy val serializeBatchAndClose: ColumnarBatch => Unit = if (isSerializedTable) {
-      serializeGpuBatchAndClose
+    private lazy val serializeBatch: ColumnarBatch => Unit = if (isSerializedTable) {
+      serializeGpuBatch
     } else {
-      serializeCpuBatchAndClose
+      serializeCpuBatch
     }
 
     override def writeValue[T: ClassTag](value: T): SerializationStream = {
-      serTime.ns(serializeBatchAndClose(value.asInstanceOf[ColumnarBatch]))
+      serTime.ns(withResource(value.asInstanceOf[ColumnarBatch])(serializeBatch))
       this
     }
 
@@ -182,7 +184,7 @@ private class GpuColumnarBatchSerializerInstance(dataSize: GpuMetric, serTime: G
       tableSerializer.close()
     }
 
-    private def serializeCpuBatchAndClose(batch: ColumnarBatch): Unit = {
+    private def serializeCpuBatch(batch: ColumnarBatch): Unit = {
       val numRows = batch.numRows()
       val numCols = batch.numCols()
       if (numCols > 0) {
@@ -206,46 +208,27 @@ private class GpuColumnarBatchSerializerInstance(dataSize: GpuMetric, serTime: G
             }
             (0 until numCols).map(i => toHostCol(batch.column(i))).toArray
           }
-          if (toClose.nonEmpty) { // a GPU batch, need to release the semaphore
-            batch.close()
-            GpuSemaphore.releaseIfNecessary(TaskContext.get())
-          } else {
-            toClose += batch
-          }
           dataSize += JCudfSerialization.getSerializedSizeInBytes(cols, startRow, numRows)
           withResource(new NvtxRange("Serialize Batch", NvtxColor.YELLOW)) { _ =>
             JCudfSerialization.writeToStream(cols, dOut, startRow, numRows)
           }
         }
       } else { // Rows only batch
-        // Release the semaphore in case it is a GPU batch even no actual data is on GPU.
-        GpuSemaphore.releaseIfNecessary(TaskContext.get())
-        batch.close()
         withResource(new NvtxRange("Serialize Row Only Batch", NvtxColor.YELLOW)) { _ =>
           JCudfSerialization.writeRowsToStream(dOut, numRows)
         }
       }
     }
 
-    private def serializeGpuBatchAndClose(batch: ColumnarBatch): Unit = {
+    private def serializeGpuBatch(batch: ColumnarBatch): Unit = {
       if (batch.numCols() > 0) {
-        batch.column(0) match {
-          case packTable: GpuPackedTableColumn =>
-            dataSize += tableSerializer.writeToStreamAndClose(packTable.getContiguousTable, dOut)
-          case o =>
-            throw new IllegalArgumentException(s"Serializing a table " +
-              s"with '${o.getClass.getSimpleName}' is not supported.")
-        }
+        val packedCol = batch.column(0).asInstanceOf[PackedTableHostColumnVector]
+        dataSize += tableSerializer.writeToStream(packedCol, dOut)
       } else {
-        // Releasing the semaphore first is ok here because no actual data is on GPU.
-        GpuSemaphore.releaseIfNecessary(TaskContext.get())
-        val numRows = batch.numRows()
-        batch.close()
-        dataSize += tableSerializer.writeRowsOnlyToStream(numRows, dOut)
+        dataSize += tableSerializer.writeRowsOnlyToStream(batch.numRows(), dOut)
       }
     }
   }
-
 
   override def deserializeStream(in: InputStream): DeserializationStream = {
     new DeserializationStream {
@@ -355,7 +338,7 @@ private sealed trait TableSerde extends AutoCloseable {
   protected val P_VERSION: Int = 0
   protected val headerLen = 8 // the size in bytes of two Ints for a header
 
-  // buffers for reuse, so it is should be only one instance of this trait per task.
+  // buffers for reuse, so it is should be only one instance of this trait per thread.
   protected val tmpBuf = new Array[Byte](1024 * 64) // 64k
   protected var hostBuffer: HostMemoryBuffer = _
 
@@ -429,28 +412,15 @@ private class SimpleTableSerializer extends TableSerde {
     }
   }
 
-  def writeToStreamAndClose(table: ContiguousTable, dOut: DataOutputStream): Long = {
-    var toClose: Option[AutoCloseable] = Some(table)
-    withResource(toClose) { _ =>
-      val dataDevBuf = table.getBuffer
-      withResource(getHostBuffer(dataDevBuf.getLength)) { hostBuf =>
-        val tableMetaBuf = MetaUtils.buildTableMeta(0, table).getByteBuffer
-        withResource(new NvtxRange("Table To Host", NvtxColor.YELLOW)) { _ =>
-          hostBuf.copyFromDeviceBuffer(dataDevBuf)
-        }
-        // Close the table and release the semaphore as soon as possible.
-        table.close()
-        toClose = None
-        GpuSemaphore.releaseIfNecessary(TaskContext.get())
-        withResource(new NvtxRange("Serialize Host Table", NvtxColor.RED)) { _ =>
-          // Start to write to stream in the order of
-          // 1) header, 2) table metadata, 3) table data on host
-          writeProtocolHeader(dOut)
-          writeByteBufferToStream(tableMetaBuf, dOut)
-          writeHostBufferToStream(hostBuf, dOut)
-        }
-        headerLen + tableMetaBuf.capacity() + hostBuf.getLength
-      }
+  def writeToStream(hostTbl: PackedTableHostColumnVector, dOut: DataOutputStream): Long = {
+    withResource(new NvtxRange("Serialize Host Table", NvtxColor.RED)) { _ =>
+      // In the order of 1) header, 2) table metadata, 3) table data on host
+      val metaBuf = hostTbl.getTableMeta.getByteBuffer
+      val dataBuf = hostTbl.getTableBuffer
+      writeProtocolHeader(dOut)
+      writeByteBufferToStream(metaBuf, dOut)
+      writeHostBufferToStream(dataBuf, dOut)
+      headerLen + metaBuf.capacity() + dataBuf.getLength
     }
   }
 }
@@ -505,6 +475,8 @@ private class SimpleTableDeserializer(sparkTypes: Array[DataType]) extends Table
   }
 
   def readFromStream(dIn: DataInputStream): ColumnarBatch = {
+    // IO operation is coming, so leave GPU for a while.
+    GpuSemaphore.releaseIfNecessary(TaskContext.get())
     // 1) read and check header
     readProtocolHeader(dIn)
     // 2) read table metadata

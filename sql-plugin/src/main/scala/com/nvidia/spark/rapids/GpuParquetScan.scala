@@ -2783,6 +2783,9 @@ class ParquetPartitionReader(
   }
 
   private def readBatches(): Iterator[ColumnarBatch] = {
+    val taskContext = TaskContext.get()
+    // Read starts with IO operations, so leaving GPU for a while.
+    GpuSemaphore.releaseIfNecessary(taskContext)
     withResource(new NvtxRange("Parquet readBatch", NvtxColor.GREEN)) { _ =>
       val currentChunkedBlocks = populateCurrentBlockChunk(blockIterator,
         maxReadBatchSizeRows, maxReadBatchSizeBytes, readDataSchema)
@@ -2793,7 +2796,7 @@ class ParquetPartitionReader(
           EmptyGpuColumnarBatchIterator
         } else {
           // Someone is going to process this data, even if it is just a row count
-          GpuSemaphore.acquireIfNecessary(TaskContext.get())
+          GpuSemaphore.acquireIfNecessary(taskContext)
           val nullColumns = readDataSchema.safeMap(f =>
             GpuColumnVector.fromNull(numRows, f.dataType).asInstanceOf[SparkVector])
           new SingleGpuColumnarBatchIterator(new ColumnarBatch(nullColumns.toArray, numRows))
@@ -2812,7 +2815,7 @@ class ParquetPartitionReader(
             CachedGpuBatchIterator(EmptyTableReader, colTypes)
           } else {
             // about to start using the GPU
-            GpuSemaphore.acquireIfNecessary(TaskContext.get())
+            GpuSemaphore.acquireIfNecessary(taskContext)
 
             RmmRapidsRetryIterator.withRetryNoSplit(dataBuffer) { _ =>
               // Inc the ref count because MakeParquetTableProducer will try to close the dataBuffer

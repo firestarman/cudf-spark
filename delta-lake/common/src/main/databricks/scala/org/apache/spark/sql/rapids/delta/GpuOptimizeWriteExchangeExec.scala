@@ -100,7 +100,9 @@ case class GpuOptimizeWriteExchangeExec(
   private lazy val sparkTypes: Array[DataType] = child.output.map(_.dataType).toArray
 
   private lazy val serializer: Serializer = new GpuColumnarBatchSerializer(
-    gpuLongMetric("dataSize"), partitioning.serializingOnGPU, sparkTypes)
+    gpuLongMetric("dataSize"), allMetrics("rapidsShuffleSerializationTime"),
+    allMetrics("rapidsShuffleDeserializationTime"),
+    partitioning.serializingOnGPU, sparkTypes)
 
   @transient lazy val inputRDD: RDD[ColumnarBatch] = child.executeColumnar()
 

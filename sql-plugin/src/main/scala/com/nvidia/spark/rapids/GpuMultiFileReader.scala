@@ -639,8 +639,6 @@ abstract class MultiFileCloudPartitionReaderBase(
         return true
       }
 
-      // Read starts with IO operations, so leaving GPU for a while.
-      GpuSemaphore.releaseIfNecessary(TaskContext.get())
       // Temporary until we get more to read
       batchIter = EmptyGpuColumnarBatchIterator
       // if we have batch left from the last file read return it
@@ -1033,9 +1031,6 @@ abstract class MultiFileCoalescingPartitionReaderBase(
   def startNewBufferRetry: Unit = ()
 
   private def readBatch(): Iterator[ColumnarBatch] = {
-    val taskContext = TaskContext.get()
-    // Read begins with IO operations, so leaving GPU for a while.
-    GpuSemaphore.releaseIfNecessary(taskContext)
     withResource(new NvtxRange(s"$getFileFormatShortName readBatch", NvtxColor.GREEN)) { _ =>
       val currentChunkMeta = populateCurrentBlockChunk()
       val batchIter = if (currentChunkMeta.clippedSchema.isEmpty) {
@@ -1045,7 +1040,7 @@ abstract class MultiFileCoalescingPartitionReaderBase(
         } else {
           val rows = currentChunkMeta.numTotalRows.toInt
           // Someone is going to process this data, even if it is just a row count
-          GpuSemaphore.acquireIfNecessary(taskContext)
+          GpuSemaphore.acquireIfNecessary(TaskContext.get())
           val nullColumns = currentChunkMeta.readSchema.safeMap(f =>
             GpuColumnVector.fromNull(rows, f.dataType).asInstanceOf[SparkVector])
           val emptyBatch = new ColumnarBatch(nullColumns.toArray, rows)

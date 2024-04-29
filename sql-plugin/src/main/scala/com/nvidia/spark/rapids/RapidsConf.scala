@@ -1774,7 +1774,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
         .createWithDefault(20)
 
   val SHUFFLE_WRITER_GPU_SERIALIZING =
-    conf("spark.rapids.shuffle.writer.serializeOnGpu.enabled")
+    conf("spark.rapids.shuffle.serializeOnGpu.enabled")
       .doc("When true, the batch serializing for Shuffle will run on GPU. " +
         "It requires making sure the shuffle writer currently being used is compatible " +
         "with this GPU serializing.")

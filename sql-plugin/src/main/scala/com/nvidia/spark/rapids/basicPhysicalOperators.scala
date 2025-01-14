@@ -324,7 +324,7 @@ object PreProjectSplitIterator {
      */
     private def estimateExprMinSize(expr: Expression, rowsNum: Int, nullable: Boolean,
         exprAmount: Option[Int]): Long = {
-      expr match {
+      val r = expr match {
         case GpuAlias(child, _) => // Alias should be ignored
           estimateExprMinSize(child, rowsNum, child.nullable, exprAmount)
         case gcs: GpuCreateNamedStruct =>
@@ -359,20 +359,25 @@ object PreProjectSplitIterator {
             estimateExprMinSize(elem, rowsNum, elemNullable, childAmount)
           }.sum
         case glit: GpuLiteral =>
+          println(s"=> literal size type for $glit")
           calcSizeForLiteral(glit.value, glit.dataType, rowsNum, nullable, exprAmount)
         case otherExpr => // other cases
           val exprType = otherExpr.dataType
           // Get the actual size if it is just a pass-through column
           tieredProject.getPassThroughIndex(otherExpr).map { colId =>
+            println(s"=> pass through size type for $otherExpr")
             getColumnSize(cb.column(colId).asInstanceOf[GpuColumnVector].getBase,
               exprType, nullable, exprAmount)
           }.getOrElse {
+            println(s"=> others size type for $otherExpr")
             // minGpuMemory is not suitable for the meta size calculation here, so do it
             // separately.
             computeMetaSize(nullable, hasOffset(exprType), rowsNum, exprAmount) +
               GpuBatchUtils.minGpuMemory(exprType, false, rowsNum, false)
           }
       }
+      println(s"======>estimated size $r for expr ${expr.getClass.getSimpleName} $expr")
+      r
     }
   }
 
@@ -632,7 +637,77 @@ class PreProjectSplitIterator(
       val minOutputSize = PreProjectSplitIterator.calcMinOutputSize(cb, boundExprs)
       // If the minimum size is too large we will split before doing the project, to help avoid
       // extreme cases where the output size is so large that we cannot split it afterwards.
-      math.max(1, math.ceil(minOutputSize / splitUntilSize).toInt)
+      //math.max(1, math.ceil(minOutputSize / splitUntilSize).toInt)
+      val ret = math.max(1, math.ceil(minOutputSize / splitUntilSize).toInt)
+      val metas = new ArrayBuffer[PreProjectSplitIterator.LitMeta]()
+      val ss =
+        withResource(boundExprs.project(cb)){ b =>
+          (0 until b.numCols()).foreach { i =>
+            getBufferSize(b.column(i).asInstanceOf[GpuColumnVector].getBase, metas)
+            println(s"====>actual size " +
+              s"${b.column(i).asInstanceOf[GpuColumnVector].getBase.getDeviceMemorySize}" +
+              s" for col ${b.column(i).dataType()}")
+          }
+          GpuColumnVector.getTotalDeviceMemoryUsed(b)
+        }
+      metas.mkString(";")
+      //println(s"==>actual metas:\n${metas.mkString("\n")}")
+      println(s"===>estimated size: $minOutputSize, actual size: $ss, " +
+        s"splitUntilSize $splitUntilSize, numSplits $ret")
+      debug()
+      ret
+    }
+  }
+
+  private def getBufferSize(cv: ColumnView,
+      metas: ArrayBuffer[PreProjectSplitIterator.LitMeta]): (Long, Long, Long) = {
+    val meta = new PreProjectSplitIterator.LitMeta(cv.getValid != null,
+      cv.getOffsets != null, s"${cv.getType.getTypeId}")
+    meta.incRowsNum(cv.getRowCount.toInt)
+    metas.append(meta)
+    var offSize = 0L
+    var dataSize = 0L
+    var validSize = 0L
+    if (cv.getData != null) {
+      dataSize += cv.getData.getLength
+    }
+    if (cv.getOffsets != null) {
+      offSize += cv.getOffsets.getLength
+    }
+    if (cv.getValid != null) {
+      validSize += cv.getValid.getLength
+    }
+    val childrenCVs = cv.getChildColumnViews
+    if (childrenCVs != null) {
+      childrenCVs.foreach { ccv =>
+        val (dataS, offS, validS) = getBufferSize(ccv, metas)
+        dataSize += dataS
+        offSize += offS
+        validSize += validS
+      }
+    }
+    println(s"======>actual size ${dataSize + offSize + validSize} for col " +
+      s"${cv.getType.getTypeId}")
+    (dataSize, offSize, validSize)
+  }
+
+  private def debug(): Unit = {
+    println("\n---> start dump")
+
+    def exprStr(e: Expression, id: Int, indent: String = ""): Unit = {
+      val spaces = s"$indent  "
+      println(s"$spaces==>Expr $id: ${e.getClass.getSimpleName} $e")
+      println(s"$spaces   Children:")
+      e.children.zipWithIndex.foreach { case (c, i) =>
+        exprStr(c, i, spaces)
+      }
+    }
+
+    boundExprs.exprTiers.zipWithIndex.foreach { case (es, i) =>
+      println(s"=> exprs at tier $i")
+      es.zipWithIndex.foreach { case (e, j) =>
+        exprStr(e, j)
+      }
     }
   }
 }

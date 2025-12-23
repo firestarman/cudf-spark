@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2021, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,13 +16,14 @@
 
 package org.apache.spark.sql.hive.rapids
 
-import com.nvidia.spark.RapidsUDF
+import com.nvidia.spark.{RapidsUDAF, RapidsUDF}
 import com.nvidia.spark.rapids.GpuUserDefinedFunction
-import org.apache.hadoop.hive.ql.exec.UDF
-import org.apache.hadoop.hive.ql.udf.generic.GenericUDF
+import org.apache.hadoop.hive.ql.exec.{UDAF, UDF}
+import org.apache.hadoop.hive.ql.udf.generic.{AbstractGenericUDAFResolver, GenericUDF}
 
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.hive.HiveShim.HiveFunctionWrapper
+import org.apache.spark.sql.rapids.aggregate.GpuTypedUserDefinedAggregateFunction
 import org.apache.spark.sql.types.DataType
 
 /** Common implementation across Hive UDFs */
@@ -67,4 +68,22 @@ case class GpuHiveGenericUDF(
   @transient
   override lazy val function: RapidsUDF = funcWrapper.createFunction[GenericUDF]()
       .asInstanceOf[RapidsUDF]
+}
+
+
+case class GpuHiveUDAFFunction(
+    name: String,
+    funcWrapper: HiveFunctionWrapper,
+    children: Seq[Expression],
+    nullable: Boolean,
+    dataType: DataType,
+    isUDAFBridgeRequired: Boolean) extends GpuTypedUserDefinedAggregateFunction {
+
+  @scala.annotation.nowarn("msg=is deprecated")
+  @transient
+  override lazy val function: RapidsUDAF = (if (isUDAFBridgeRequired) {
+    funcWrapper.createFunction[UDAF]()
+  } else {
+    funcWrapper.createFunction[AbstractGenericUDAFResolver]()
+  }).asInstanceOf[RapidsUDAF]
 }

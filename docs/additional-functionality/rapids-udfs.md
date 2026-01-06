@@ -147,39 +147,33 @@ RAPIDS also supports an accelerated version of UDAFs via the `RapidsUDAF` interf
 Users can choose to implement its APIs as below to get the GPU acceleration.
 
 - ```java
-  DataType[] aggBufferTypes();
-  ```
-  Specify the schema of the intermediate results (aka aggregation buffers) for this aggregation.
-
-- ```java
   Scalar[] getDefaultValue();
   ```
   Provide default values for this aggregation as an array of cuDF Scalar. This is used when a
   reduction has no rows to aggregate. And the values should follow the schema returned from
-  `aggBufferTypes()`.
-
-- ```java
-  default ColumnVector[] preProcess(int numRows, ColumnVector[] args);
-  ```
-  Transform the cuDF `ColumnVector`s of input values. By default, it returns the input as-is.
+  `bufferTypes()`.
 
 - ```java
   RapidsUDAFGroupByAggregation updateAggregation();
   ```
-  Build a `RapidsUDAFGroupByAggregation` to perform initial aggregates on the transformed
-  `ColumnVector`s returned from the `preProcess` method.
+  Build a `RapidsUDAFGroupByAggregation` to perform initial aggregates on the input data.
 
 - ```java
   RapidsUDAFGroupByAggregation mergeAggregation();
   ```
   Build a `RapidsUDAFGroupByAggregation` to merge multiple sets of intermediate results
-  produced by the RAPIDS aggregation returned from `updateAggregation()`.
+  produced by `updateAggregation()`.
 
 - ```java
-  ColumnVector postProcess(int numRows, ColumnVector[] args, DataType outType);
+  ColumnVector getResult(int numRows, ColumnVector[] args, DataType outType);
   ```
   Transform the merged intermediate results processed by `mergeAggregation()`
-  to produce the final result.
+  to output the final result.
+
+- ```java
+  DataType[] bufferTypes();
+  ```
+  Specify the schema of the intermediate results (aka aggregation buffers) for this aggregation.
 
 `RapidsUDAFGroupByAggregation` is a base interface for RAPIDS aggregation implementations.
 And it provides the contract for different aggregation strategies. So far it has only one
@@ -192,22 +186,18 @@ cases.
   - ```java
     default ColumnVector[] preStep(int numRows, ColumnVector[] args);
     ```
-    Transform the cuDF `ColumnVector`s of intermediate results. This is only used by the
-    `RapidsUDAFGroupByAggregation` returned from the `mergeAggregation()`.
-    By default, it returns the input as-is.
+    Transform the cuDF `ColumnVector`s of the input data. By default, it returns the input as-is.
 
   - ```java
     Scalar[] reduce(int numRows, ColumnVector[] preStepData);
     ```
-    Perform reductions on the transformed `ColumnVector`s from either the `preProcess`
-    method for the `updateAggregation()`, or the `preStep` method for the `mergeAggregation()`.
+    Perform reductions on the transformed `ColumnVector`s from the `preStep` method.
 
   - ```java
     GroupByAggregationOnColumn[] aggregate(int[] inputIndices);
     ```
     Specify cuDF group-by aggregates on the transformed `ColumnVector`s (provided as column
-    indices here) from either the `preProcess` method for the `updateAggregation()`, or the
-    `preStep` method for the `mergeAggregation()`.
+    indices here) from the `preStep` method.
 
   - ```java
     default ColumnVector[] postStep(ColumnVector[] aggregatedData);
@@ -221,15 +211,15 @@ Here is the APIs summary of both CPU and GPU UDAF interfaces.
 `GenericUDAFEvaluator` is from Hive.
 APIs in the same table row play a similar role during an aggregation.
 
-| RapidsUDAF                          | UserDefinedAggregateFunction | Aggregator      | GenericUDAFEvaluator            |
-|:------------------------------------|:-----------------------------|:----------------|:--------------------------------|
-| `getDefaultValue`                   | `initialize`                 | `zero`          | `getNewAggregationBuffer`       |
-| `preProcess`<br>`updateAggregation` | `update`                     | `reduce`        | `iterate`<br>`terminatePartial` |
-| `mergeAggregation`                  | `merge`                      | `merge`         | `merge`                         |
-| `postProcess`                       | `evaluate`                   | `finish`        | `terminate`                     |
-| `aggBufferTypes`                    | `bufferSchema`               | `bufferEncoder` | `init` (partial mode)           |
-| (get from the CPU operator)         | `dataType`                   | `outputEncoder` | `init` (final mode)             |
-|                                     | `inputSchema`                |                 |                                 |
+| RapidsUDAF                  | UserDefinedAggregateFunction | Aggregator      | GenericUDAFEvaluator            |
+|:----------------------------|:-----------------------------|:----------------|:--------------------------------|
+| `getDefaultValue`           | `initialize`                 | `zero`          | `getNewAggregationBuffer`       |
+| `updateAggregation`         | `update`                     | `reduce`        | `iterate`<br>`terminatePartial` |
+| `mergeAggregation`          | `merge`                      | `merge`         | `merge`                         |
+| `getResult`                 | `evaluate`                   | `finish`        | `terminate`                     |
+| `bufferTypes`               | `bufferSchema`               | `bufferEncoder` | `init` (partial mode)           |
+| (get from the CPU operator) | `dataType`                   | `outputEncoder` | `init` (final mode)             |
+|                             | `inputSchema`                |                 |                                 |
 
 ## RAPIDS Accelerated UDAF Examples
 Source code for examples of RAPIDS UDAFs can be found in the following 3 relevant test suites.

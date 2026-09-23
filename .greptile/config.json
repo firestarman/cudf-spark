@@ -21,7 +21,7 @@
     },
     {
       "id": "oom-retry-handling",
-      "rule": "GPU memory-allocating code must be wrapped in withRetry/withRetryNoSplit from RmmRapidsRetryIterator. The retry function must be idempotent. Input should be SpillableColumnarBatch before entering retry.",
+      "rule": "GPU memory-allocating code must be wrapped in withRetry/withRetryNoSplit from RmmRapidsRetryIterator. Before entering retry, caller-owned data whose retention can prevent OOM recovery must be spillable. Retry input is not limited to SpillableColumnarBatch: it may be an AutoCloseable such as SpillableColumnarBatch, SpillableTable, SpillableBuffer, SpillableHostBuffer, or a purpose-built composite wrapper, provided ownership is transferred to the retry helper and each attempt can materialize fresh resources. The retry function must be idempotent and must close resources materialized during each attempt. Mutable state must be checkpointed and restored with Retryable/withRestoreOnRetry. A split policy must close the original input and return independently owned replacement inputs.",
       "scope": ["sql-plugin/src/**", "shuffle-plugin/src/**"],
       "severity": "high"
     },

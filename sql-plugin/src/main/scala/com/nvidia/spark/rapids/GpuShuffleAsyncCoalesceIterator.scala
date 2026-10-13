@@ -42,6 +42,9 @@ class GpuShuffleAsyncCoalesceIterator(iter: Iterator[CoalescedHostResult],
     asyncReadTimeMetric: GpuMetric = NoopMetric,
     opTimeMetric: GpuMetric = NoopMetric,
     readThrottlingMetric: GpuMetric = NoopMetric,
+    readTimeMetric: GpuMetric = NoopMetric,
+    semReadTimeMetric: GpuMetric = NoopMetric,
+    bgJobLaunchTimeMetric: GpuMetric = NoopMetric,
 ) extends Iterator[ColumnarBatch] {
 
   // Don't install the callback if in a unit test
@@ -63,25 +66,36 @@ class GpuShuffleAsyncCoalesceIterator(iter: Iterator[CoalescedHostResult],
     executor.shutdownNow(10, TimeUnit.SECONDS)
   }
 
-  private lazy val readCallable = new Callable[CoalescedHostResult]() {
+  private type ReadResult = (CoalescedHostResult, Long)
+
+  private class ReadCallable extends Callable[ReadResult] {
+    private val submittedAt = System.nanoTime()
+
     // The actual async read, including the host batches read and concatenation in
     // "HostCoalesceIteratorBase.next()".
-    override def call(): CoalescedHostResult = {
+    override def call(): ReadResult = {
+      val launchTime = System.nanoTime() - submittedAt
       NvtxRegistry.ASYNC_SHUFFLE_READ {
-        iter.next()
+        (iter.next(), launchTime)
       }
     }
   }
 
-  private var readFutureOpt: Option[Future[CoalescedHostResult]] = None
+  private var readFutureOpt: Option[Future[ReadResult]] = None
 
-  override def hasNext: Boolean = GpuMetric.ns(asyncReadTimeMetric, opTimeMetric) {
-    readFutureOpt.isDefined || {
-      // No async read is running when it comes here, so no need synchronization
-      // when accessing the input iterator. "iter.hasNext" should be lightweight
-      // enough, since it just read in a header which is very small.
-      iter.hasNext
+  private def withReadMetrics[R](f: => R): R = opTimeMetric.ns {
+    asyncReadTimeMetric.ns {
+      GpuMetric.withSemaphoreTime(readTimeMetric, semReadTimeMetric, TaskContext.get()) {
+        f
+      }
     }
+  }
+
+  override def hasNext: Boolean = readFutureOpt.isDefined || {
+    // No async read is running when it comes here, so no need synchronization
+    // when accessing the input iterator. "iter.hasNext" should be lightweight
+    // enough, since it just read in a header which is very small.
+    withReadMetrics(iter.hasNext)
   }
 
   override def next(): ColumnarBatch = {
@@ -89,10 +103,12 @@ class GpuShuffleAsyncCoalesceIterator(iter: Iterator[CoalescedHostResult],
       throw new NoSuchElementException("No more batches")
     }
     NvtxRegistry.ASYNC_SHUFFLE_READ {
-      val hostConcatedRet = GpuMetric.ns(asyncReadTimeMetric, opTimeMetric) {
+      val hostConcatedRet = withReadMetrics {
         readFutureOpt.map { readFuture =>
           // An async read is running, waiting for the result
-          readFuture.get()
+          val (result, launchTime) = readFuture.get()
+          bgJobLaunchTimeMetric.add(launchTime)
+          result
         }.getOrElse { // The first batch, just read it directly
           iter.next()
         }
@@ -105,13 +121,13 @@ class GpuShuffleAsyncCoalesceIterator(iter: Iterator[CoalescedHostResult],
         GpuMetric.ns(opTimeMetric)(hostConcatedRet.toGpuBatch(dataTypes))
       }
       closeOnExcept(gpuCB) { _ =>
-        val hasNextCB = GpuMetric.ns(asyncReadTimeMetric, opTimeMetric)(iter.hasNext)
+        val hasNextCB = withReadMetrics(iter.hasNext)
         GpuMetric.ns(opTimeMetric) {
           // No need synchronization here since the async read is already done.
           if (hasNextCB) {
             // Prefetch and concatenate the next one asynchronously.
             readFutureOpt = Some(executor.submit(
-              readCallable,
+              new ReadCallable,
               // This is just a estimation, may overestimate.
               // Why not targetBatchSize * 2 (1 targetBatchSize for prefetch and 1 targetBatchSize
               // for concatenate) ? Because this executor actually only accounts for

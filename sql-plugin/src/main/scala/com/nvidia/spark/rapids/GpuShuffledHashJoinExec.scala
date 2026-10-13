@@ -20,6 +20,7 @@ import scala.collection.mutable
 
 // No longer need NvtxColor, NvtxRange imports
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.GpuShuffledHashJoinExec.BUILD_PREFIX
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.shims.{GpuHashPartitioning, ShimBinaryExecNode}
 
@@ -206,7 +207,8 @@ case class GpuShuffledHashJoinExec(
     CPU_BRIDGE_PROCESSING_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
       DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME),
     CPU_BRIDGE_WAIT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
-      DESCRIPTION_CPU_BRIDGE_WAIT_TIME))
+      DESCRIPTION_CPU_BRIDGE_WAIT_TIME)
+  ) ++ ShuffleCoalReadMetrics.createAsMap(this, isAsync = false, BUILD_PREFIX)
 
   override def requiredChildDistribution: Seq[Distribution] =
     Seq(GpuHashPartitioning.getDistribution(cpuLeftKeys),
@@ -258,11 +260,11 @@ case class GpuShuffledHashJoinExec(
     // iterators, setting as noop certain metrics that the coalesce iterators
     // normally update, but that in the case of the join they would produce
     // the wrong statistics (since there are conflicts)
-    val coalesceMetrics = allMetrics ++
+    val coalesceMetrics = (allMetrics ++
       Map(GpuMetric.NUM_INPUT_ROWS -> NoopMetric,
           GpuMetric.NUM_INPUT_BATCHES -> NoopMetric,
           GpuMetric.NUM_OUTPUT_BATCHES -> NoopMetric,
-          GpuMetric.NUM_OUTPUT_ROWS -> NoopMetric)
+          GpuMetric.NUM_OUTPUT_ROWS -> NoopMetric)).withDefaultValue(NoopMetric)
 
     val realTarget = realTargetBatchSize()
     val joinOptions = RapidsConf.getJoinOptions(conf, realTarget)
@@ -303,6 +305,8 @@ case class GpuShuffledHashJoinExec(
 }
 
 object GpuShuffledHashJoinExec extends Logging {
+  private[rapids] val BUILD_PREFIX = "build"
+
   /**
    * Return the build data as a single ColumnarBatch when sub-partitioning is not enabled,
    * while as an iterator of ColumnarBatch when sub-partitioning is enabled.
@@ -387,9 +391,12 @@ object GpuShuffledHashJoinExec extends Logging {
               coalesceBuiltIter
           }
           val gpuBuildIter = if (isHostSerialized) {
+            val shuffleReadMetrics = ShuffleCoalReadMetrics(coalesceMetrics, BUILD_PREFIX)
             // batches on host, move them to GPU
             new GpuShuffleCoalesceIterator(safeIter.asInstanceOf[Iterator[CoalescedHostResult]],
-              buildDataType)
+              buildDataType,
+              shuffleReadTimeMetric = shuffleReadMetrics.readTimeMetric,
+              semaphoreReadTimeMetric = shuffleReadMetrics.semReadTimeMetric)
           } else { // batches already on GPU
             safeIter.asInstanceOf[Iterator[ColumnarBatch]]
           }
@@ -538,6 +545,7 @@ object GpuShuffledHashJoinExec extends Logging {
     var retIter: Option[(Iterator[AutoCloseable], Boolean)] = None
     if (iter.hasNext && iter.head.numCols() == 1) {
       val concatTime = coalesceMetrics(GpuMetric.CONCAT_TIME)
+      val shuffleReadMetrics = ShuffleCoalReadMetrics(coalesceMetrics, BUILD_PREFIX)
       iter.head.column(0) match {
         case _: KudoSerializedTableColumn =>
           if (readOption.kudoMode == RapidsConf.ShuffleKudoMode.GPU) {
@@ -546,12 +554,14 @@ object GpuShuffledHashJoinExec extends Logging {
             retIter = Some((gpuIter, false)) // GPU batches
           } else {
             val hostIter = new KudoHostShuffleCoalesceIterator(iter, targetSize, dataTypes,
-              concatTimeMetric = concatTime, readOption = readOption)
+              concatTimeMetric = concatTime, readOption = readOption,
+              bufferJobLaunchMetric = shuffleReadMetrics.bgJobLaunchMetric)
             retIter = Some((hostIter, true)) // host results
           }
         case _: SerializedTableColumn =>
           val hostIter = new HostShuffleCoalesceIterator(iter, targetSize,
-            concatTimeMetric = concatTime)
+            concatTimeMetric = concatTime,
+            bufferJobLaunchMetric = shuffleReadMetrics.bgJobLaunchMetric)
           retIter = Some((hostIter, true)) // host results
         case _ => // should be gpu batches
       }

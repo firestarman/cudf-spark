@@ -1212,6 +1212,14 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val shuffleMultiThreadedReaderThreads: Int = get(SHUFFLE_MULTITHREADED_READER_THREADS)
 
+  lazy val isShuffleWriteCoalesceEnabled: Boolean = get(SHUFFLE_WRITER_COALESCE_ENABLED)
+
+  lazy val shuffleWriteCoalesceMinPartitionSize: Long =
+    get(SHUFFLE_WRITER_COALESCE_MIN_PARTITION_SIZE)
+
+  lazy val shuffleWriteCoalesceTotalPartitionsSize: Long =
+    get(SHUFFLE_WRITER_COALESCE_TOTAL_PARTITIONS_SIZE)
+
   lazy val shuffleParitioningMaxCpuBatchSize: Long = get(SHUFFLE_PARTITIONING_MAX_CPU_BATCH_SIZE)
 
   lazy val shuffleKudoSerializerEnabled: Boolean = get(SHUFFLE_KUDO_SERIALIZER_ENABLED)

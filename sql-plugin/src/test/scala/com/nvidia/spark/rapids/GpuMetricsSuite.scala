@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -95,5 +95,44 @@ class GpuMetricsSuite extends AnyFunSuite {
       s"Parent should have at least 150ms of recorded time, got ${parentOpTime.value}ns")
     assert(parentOpTime.value < expectedParentTime + tolerance,
       s"Parent time (${parentOpTime.value}ns) should be close to expected ~200ms with tolerance")
+  }
+
+  test("shuffle coalesce read metrics resolve prefixed metrics") {
+    val readTime = new LocalGpuMetric
+    val semaphoreReadTime = new LocalGpuMetric
+    val backgroundJobLaunchTime = new LocalGpuMetric
+    val metrics = Map[String, GpuMetric](
+      "leftrapidsShuffleReadTime" -> readTime,
+      "leftrapidsShuffleReadTimeWithSem" -> semaphoreReadTime,
+      "leftrapidsBGJobLaunchTime" -> backgroundJobLaunchTime)
+
+    val resolved = ShuffleCoalReadMetrics(metrics, "left")
+
+    assert(resolved.readTimeMetric eq readTime)
+    assert(resolved.semReadTimeMetric eq semaphoreReadTime)
+    assert(resolved.bgJobLaunchMetric eq backgroundJobLaunchTime)
+
+    val missing = ShuffleCoalReadMetrics(Map.empty)
+    assert(missing.readTimeMetric eq NoopMetric)
+    assert(missing.semReadTimeMetric eq NoopMetric)
+    assert(missing.bgJobLaunchMetric eq NoopMetric)
+  }
+
+  test("shuffle coalesce read metrics filter unrelated metrics") {
+    val readTime = new LocalGpuMetric
+    val semaphoreReadTime = new LocalGpuMetric
+    val backgroundJobLaunchTime = new LocalGpuMetric
+    val metrics = Map[String, GpuMetric](
+      "rightrapidsShuffleReadTime" -> readTime,
+      "rightrapidsShuffleReadTimeWithSem" -> semaphoreReadTime,
+      "rightrapidsBGJobLaunchTime" -> backgroundJobLaunchTime,
+      GpuMetric.CONCAT_TIME -> new LocalGpuMetric)
+
+    val filtered = ShuffleCoalReadMetrics.filter(metrics)
+
+    assert(filtered.keySet == Set(
+      "rightrapidsShuffleReadTime",
+      "rightrapidsShuffleReadTimeWithSem",
+      "rightrapidsBGJobLaunchTime"))
   }
 }

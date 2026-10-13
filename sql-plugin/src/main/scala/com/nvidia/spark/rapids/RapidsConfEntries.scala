@@ -379,6 +379,33 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .integerConf
       .createWithDefault(20)
 
+  val SHUFFLE_WRITER_COALESCE_ENABLED =
+    conf("spark.rapids.shuffle.writer.coalesce.enabled")
+      .doc("Enable or disable coalescing small host batches by reduce partition before they are " +
+        "sent to the MULTITHREADED shuffle writer. This setting does not apply to GPU shuffle " +
+        "or Kudo GPU write mode.")
+      .internal()
+      .booleanConf
+      .createWithDefault(true)
+
+  val SHUFFLE_WRITER_COALESCE_MIN_PARTITION_SIZE =
+    conf("spark.rapids.shuffle.writer.coalesce.minPartitionSize")
+      .doc("The target size for a coalesced shuffle-write partition batch. Smaller batches for " +
+        "the same reduce partition are retained and concatenated before serialization.")
+      .internal()
+      .bytesConf(ByteUnit.BYTE)
+      .checkValue(_ > 0, "minPartitionSize must be positive")
+      .createWithDefault(5 * 1024 * 1024)
+
+  val SHUFFLE_WRITER_COALESCE_TOTAL_PARTITIONS_SIZE =
+    conf("spark.rapids.shuffle.writer.coalesce.totalPartitionsSize")
+      .doc("The aggregate host-memory budget used to derive the per-partition shuffle-write " +
+        "coalesce target across concurrently running tasks.")
+      .internal()
+      .bytesConf(ByteUnit.BYTE)
+      .checkValue(_ > 0, "totalPartitionsSize must be positive")
+      .createWithDefault(10L * 1024 * 1024 * 1024)
+
   val SHUFFLE_PARTITIONING_MAX_CPU_BATCH_SIZE =
     conf("spark.rapids.shuffle.partitioning.maxCpuBatchSize")
       .doc("The maximum size of a sliced batch output to the CPU side " +

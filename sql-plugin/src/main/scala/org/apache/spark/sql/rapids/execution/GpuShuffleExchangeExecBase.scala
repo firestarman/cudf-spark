@@ -336,6 +336,8 @@ object GpuShuffleExchangeExecBase {
     "RAPIDS shuffle deserialization from input stream time"
   val METRIC_SHUFFLE_PARTITION_TIME = "rapidsShufflePartitionTime"
   val METRIC_DESC_SHUFFLE_PARTITION_TIME = "RAPIDS shuffle partition time"
+  val METRIC_SHUFFLE_WRITE_COALESCE_TIME = "rapidsShuffleWriteCoalesceTime"
+  val METRIC_DESC_SHUFFLE_WRITE_COALESCE_TIME = "RAPIDS shuffle write coalesce time"
   val METRIC_SHUFFLE_READ_TIME = "rapidsShuffleReadTime"
   val METRIC_DESC_SHUFFLE_READ_TIME = "RAPIDS shuffle shuffle read time"
   val METRIC_SHUFFLE_SER_COPY_BUFFER_TIME = "rapidsShuffleSerializationCopyBufferTime"
@@ -386,6 +388,8 @@ object GpuShuffleExchangeExecBase {
         gpu.createNanoTimingMetric(DEBUG_LEVEL, METRIC_DESC_SHUFFLE_DESER_STREAM_TIME),
     METRIC_SHUFFLE_PARTITION_TIME ->
         gpu.createNanoTimingMetric(DEBUG_LEVEL, METRIC_DESC_SHUFFLE_PARTITION_TIME),
+    METRIC_SHUFFLE_WRITE_COALESCE_TIME ->
+        gpu.createNanoTimingMetric(MODERATE_LEVEL, METRIC_DESC_SHUFFLE_WRITE_COALESCE_TIME),
     METRIC_SHUFFLE_READ_TIME ->
         gpu.createNanoTimingMetric(ESSENTIAL_LEVEL, METRIC_DESC_SHUFFLE_READ_TIME),
     METRIC_SHUFFLE_SER_COPY_BUFFER_TIME ->
@@ -465,6 +469,26 @@ object GpuShuffleExchangeExecBase {
       newPartitioning, metrics, rangeBoundaryPlan)
     val useRangeInputBatching = rangeInputBatchingEnabled &&
       newPartitioning.isInstanceOf[GpuRangePartitioning]
+    val rapidsConf = new RapidsConf(SQLConf.get)
+    val useWriteCoalesce = GpuShuffleWriteCoalesceIterator.shouldCoalesce(
+      rapidsConf.isShuffleWriteCoalesceEnabled,
+      useMultiThreadedShuffle,
+      useGPUShuffle,
+      newPartitioning.usesKudoGPUSlicing)
+    val writeCoalesceSettings = if (useWriteCoalesce) {
+      val parallelism = math.max(newRdd.context.defaultParallelism, 1)
+      val taskBudget = GpuShuffleWriteCoalesceIterator.perTaskBudget(
+        rapidsConf.shuffleWriteCoalesceTotalPartitionsSize,
+        parallelism,
+        newPartitioning.numPartitions)
+      val targetSize = GpuShuffleWriteCoalesceIterator.targetSize(
+        rapidsConf.shuffleWriteCoalesceMinPartitionSize,
+        taskBudget,
+        newPartitioning.numPartitions)
+      Some((targetSize, taskBudget))
+    } else {
+      None
+    }
     // Inject debugging subMetrics, such as D2HTime before SliceOnCpu
     // The injected metrics will be serialized as the members of GpuPartitioning
     partitioner match {
@@ -480,7 +504,7 @@ object GpuShuffleExchangeExecBase {
     val rddWithPartitionIds: RDD[Product2[Int, ColumnarBatch]] = {
       newRdd.mapPartitions { iter =>
         val getParts = getPartitioned
-        new AbstractIterator[Product2[Int, ColumnarBatch]] {
+        val partitionedIterator = new AbstractIterator[Product2[Int, ColumnarBatch]] {
           private var partitionedIter: Iterator[Array[(ColumnarBatch, Int)]] =
             Iterator.empty
           private var partitioned: Array[(ColumnarBatch, Int)] = _
@@ -518,10 +542,12 @@ object GpuShuffleExchangeExecBase {
             // Process the next partitioned array from the iterator
             if (partitionedIter.hasNext) {
               partitioned = partitionedIter.next()
-              partitioned.foreach(batches => {
-                metrics(GpuMetric.NUM_OUTPUT_ROWS) += batches._1.numRows()
-              })
-              metrics(GpuMetric.NUM_OUTPUT_BATCHES) += partitioned.length
+              if (!useWriteCoalesce) {
+                partitioned.foreach { case (batch, _) =>
+                  metrics(GpuMetric.NUM_OUTPUT_ROWS) += batch.numRows()
+                }
+                metrics(GpuMetric.NUM_OUTPUT_BATCHES) += partitioned.length
+              }
               at = 0
             }
           }
@@ -547,6 +573,15 @@ object GpuShuffleExchangeExecBase {
             mutablePair
           }
         }
+        writeCoalesceSettings.map { case (targetSize, taskBudget) =>
+          new GpuShuffleWriteCoalesceIterator(
+            partitionedIterator,
+            targetSize,
+            taskBudget,
+            metrics(GpuMetric.NUM_OUTPUT_BATCHES),
+            metrics(GpuMetric.NUM_OUTPUT_ROWS),
+            metrics(METRIC_SHUFFLE_WRITE_COALESCE_TIME))
+        }.getOrElse(partitionedIterator)
       }
     }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,11 @@
 
 package com.nvidia.spark.rapids.io.async
 
-import java.util.concurrent.{Callable, ExecutorService, Future, TimeUnit}
+import java.util.concurrent.{Callable, ExecutorService, Future, FutureTask, TimeUnit}
+import java.util.concurrent.atomic.AtomicBoolean
+
+import scala.collection.JavaConverters._
+import scala.util.control.NonFatal
 
 import org.apache.spark.sql.rapids.{ColumnarWriteTaskStatsTracker, GpuWriteTaskStatsTracker}
 
@@ -70,18 +74,60 @@ class ThrottlingExecutor(executor: ExecutorService, throttler: TrafficController
     val task = new Task[T](hostMemoryBytes, callable)
     blockUntilTaskRunnable(task)
 
-    executor.submit(() => {
-      try {
-        task.call()
-      } finally {
-        throttler.taskCompleted(task)
+    val released = new AtomicBoolean(false)
+    def releaseReservation(): Unit = {
+      if (released.compareAndSet(false, true)) throttler.taskCompleted(task)
+    }
+    val future = new FutureTask[T](new Callable[T] {
+      override def call(): T = {
+        try {
+          task.call()
+        } finally {
+          releaseReservation()
+        }
       }
-    })
+    }) {
+      private var started = false
+
+      override def run(): Unit = {
+        val shouldRun = synchronized {
+          if (isCancelled) {
+            false
+          } else {
+            started = true
+            true
+          }
+        }
+        if (shouldRun) {
+          try {
+            super.run()
+          } finally {
+            // Cancellation can win after started=true but before FutureTask invokes the callable.
+            releaseReservation()
+          }
+        }
+      }
+
+      override protected def done(): Unit = synchronized {
+        if (!started) releaseReservation()
+      }
+    }
+    try {
+      executor.execute(future)
+      future
+    } catch {
+      case NonFatal(e) =>
+        future.cancel(false)
+        throw e
+    }
   }
 
   def shutdownNow(timeout: Long, timeUnit: TimeUnit): Unit = {
     updateStats(stats)
-    executor.shutdownNow()
+    executor.shutdownNow().asScala.foreach {
+      case future: Future[_] => future.cancel(false)
+      case _ =>
+    }
     executor.awaitTermination(timeout, timeUnit)
   }
 }

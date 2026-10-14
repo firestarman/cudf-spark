@@ -17,6 +17,7 @@
 package com.nvidia.spark.rapids
 
 import java.math.RoundingMode
+import java.util.concurrent.ConcurrentLinkedQueue
 
 import ai.rapids.cudf.{ColumnVector, Cuda, DType, Table}
 import com.nvidia.spark.rapids.Arm.withResource
@@ -161,17 +162,19 @@ class GpuShuffleCoalesceSuite extends AnyFunSuite with BeforeAndAfterEach {
       GpuMetric.NUM_OUTPUT_ROWS -> com.nvidia.spark.rapids.NoopMetric,
       GpuMetric.OP_TIME_LEGACY -> com.nvidia.spark.rapids.NoopMetric,
       GpuMetric.READ_THROTTLING_TIME -> com.nvidia.spark.rapids.NoopMetric,
-      GpuMetric.SYNC_READ_TIME -> com.nvidia.spark.rapids.NoopMetric
+      GpuMetric.SYNC_READ_TIME -> com.nvidia.spark.rapids.NoopMetric,
+      GpuMetric.ASYNC_READ_TIME -> com.nvidia.spark.rapids.NoopMetric,
+      "rapidsBGJobLaunchTime" -> new LocalGpuMetric
     )
   }
 
-  private def createReadOption(): CoalesceReadOption = {
+  private def createReadOption(useAsync: Boolean): CoalesceReadOption = {
     CoalesceReadOption(
       kudoEnabled = true,
       kudoMode = RapidsConf.ShuffleKudoMode.GPU,
       kudoDebugMode = DumpOption.Never,
       kudoDebugDumpPrefix = None,
-      useAsync = false
+      useAsync = useAsync
     )
   }
 
@@ -194,7 +197,9 @@ class GpuShuffleCoalesceSuite extends AnyFunSuite with BeforeAndAfterEach {
   private def runKudoShuffleTest(
       targetBatchSize: Long,
       minSplitSize: Option[Long] = None,
-      forceSplitRetry: Boolean = false): Unit = {
+      forceSplitRetry: Boolean = false,
+      useAsync: Boolean = false,
+      expectPrefetch: Boolean = false): Unit = {
     TrampolineUtil.cleanupAnyExistingSession()
     val conf = createSparkConf()
     TestUtils.withGpuSparkSession(conf) { _ =>
@@ -215,11 +220,16 @@ class GpuShuffleCoalesceSuite extends AnyFunSuite with BeforeAndAfterEach {
 
           // Simulate the full shuffle round-trip: serialize to stream, then deserialize back
           val serializedData = serializeBatchesToStream(serializedPartitions, dataTypes)
+          val readThreads = new ConcurrentLinkedQueue[String]()
           val kudoBatchesIter = deserializeStreamToIterator(serializedData, dataTypes)
+            .map { batch =>
+            readThreads.add(Thread.currentThread().getName)
+            batch
+          }
 
           // Set up metrics and read options
           val metricsMap = createMetricsMap()
-          val readOption = createReadOption()
+          val readOption = createReadOption(useAsync)
 
           // Get the coalescing iterator
           val coalesceIter = minSplitSize match {
@@ -245,6 +255,14 @@ class GpuShuffleCoalesceSuite extends AnyFunSuite with BeforeAndAfterEach {
           // Verify results
           verifyAndCompareResults(deserializedBatches, originalBatch, dataTypes)
 
+          if (expectPrefetch) {
+            assert(metricsMap("rapidsBGJobLaunchTime").value > 0)
+            assert(readThreads.toArray.exists(_.toString.startsWith(
+              "async GPU shuffle buffer thread for ")))
+          } else if (!useAsync) {
+            assert(metricsMap("rapidsBGJobLaunchTime").value == 0)
+          }
+
           if (forceSplitRetry) {
             val retryCount = RmmSpark.getAndResetNumSplitRetryThrow(1)
             assert(retryCount > 0,
@@ -267,6 +285,40 @@ class GpuShuffleCoalesceSuite extends AnyFunSuite with BeforeAndAfterEach {
       targetBatchSize = 100000,
       minSplitSize = Some(1L),
       forceSplitRetry = true)
+  }
+
+  test("GPU kudo asynchronously prefetches serialized input") {
+    runKudoShuffleTest(targetBatchSize = 1, useAsync = true, expectPrefetch = true)
+  }
+
+  test("GPU kudo async read retains split retry") {
+    runKudoShuffleTest(targetBatchSize = 100000, minSplitSize = Some(1L),
+      forceSplitRetry = true, useAsync = true)
+  }
+
+  Seq(("GPU", true), ("CPU", true), ("GPU", false)).foreach { case (mode, useKudo) =>
+    test(s"shuffle defaults to async read in a Spark task: mode=$mode, kudo=$useKudo") {
+      val conf = createSparkConf()
+        .set(RapidsConf.SHUFFLE_KUDO_WRITE_MODE.key, "CPU")
+        .set(RapidsConf.SHUFFLE_KUDO_READ_MODE.key, mode)
+        .set(RapidsConf.SHUFFLE_KUDO_SERIALIZER_ENABLED.key, useKudo.toString)
+        .set("spark.shuffle.manager", GpuShuffleEnv.RAPIDS_SHUFFLE_CLASS)
+        .set(RapidsConf.SHUFFLE_MANAGER_MODE.key, "MULTITHREADED")
+        .set(RapidsConf.GPU_BATCH_SIZE_BYTES.key, "4096")
+        .set(RapidsConf.METRICS_LEVEL.key, "DEBUG")
+        .set("spark.sql.adaptive.enabled", "false")
+      TestUtils.withGpuSparkSession(conf) { spark =>
+        val rows = 50000L
+        val query = spark.range(0L, rows, 1L, 2).repartition(2).selectExpr("sum(id)")
+        assert(query.collect().head.getLong(0) == rows * (rows - 1) / 2)
+        val readers = query.queryExecution.executedPlan.collect {
+          case reader: GpuShuffleCoalesceExec => reader
+        }
+        assert(readers.nonEmpty, "Query must exercise GPU shuffle coalescing")
+        assert(readers.exists(_.allMetrics("rapidsBGJobLaunchTime").value > 0),
+          "Default shuffle must execute a background prefetch")
+      }
+    }
   }
 
 }

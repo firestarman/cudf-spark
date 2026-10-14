@@ -467,11 +467,12 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
   val SHUFFLE_ASYNC_READ_ENABLED = conf("spark.rapids.sql.asyncRead.shuffle.enabled")
     .doc("Enable or disable the asynchronous read for Shuffle. If you turn this on you should " +
       "also consider increasing spark.rapids.sql.asyncRead.maxInFlightHostMemoryBytes so that " +
-      "async threads won't be blocked by the memory limit. If By default this in off now.")
+      "async threads won't be blocked by the memory limit. In Kudo GPU read mode only host " +
+      "input is prefetched; GPU deserialization and coalescing stay on the task thread.")
     .internal()
     .startupOnly()
     .booleanConf
-    .createWithDefault(false)
+    .createWithDefault(true)
 
   // ["NEVER", "ALWAYS", "ONFAILURE"]
   private val KudoDebugModes =

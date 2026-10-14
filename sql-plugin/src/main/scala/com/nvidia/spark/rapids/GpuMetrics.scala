@@ -336,6 +336,18 @@ object GpuMetric extends Logging {
       wallTime: GpuMetric,
       semTime: GpuMetric,
       ctx: TaskContext)(f: => T): T = {
+    if (ctx == null) {
+      // Driver-side reads and standalone iterator tests do not own a task semaphore.
+      wallTime.ns(f)
+    } else {
+      withTaskSemaphoreTime(wallTime, semTime, ctx)(f)
+    }
+  }
+
+  private def withTaskSemaphoreTime[T](
+      wallTime: GpuMetric,
+      semTime: GpuMetric,
+      ctx: TaskContext)(f: => T): T = {
     val start = System.nanoTime()
     val semStart = GpuTaskMetrics.get.getSemaphoreHoldingTime
     // Compute the preBlockHead if there exists a partial lead interval. The preBlockHead will

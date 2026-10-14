@@ -21,6 +21,26 @@ import org.scalatest.funsuite.AnyFunSuite
 
 class GpuMetricsSuite extends AnyFunSuite {
 
+  test("shuffle read timing without a task does not access the GPU semaphore") {
+    val wallTime = new LocalGpuMetric
+    val semaphoreTime = new LocalGpuMetric
+    val result = GpuMetric.withSemaphoreTime(wallTime, semaphoreTime, null) { 42 }
+    assert(result == 42)
+    assert(wallTime.value > 0)
+    assert(semaphoreTime.value == 0)
+  }
+
+  test("shuffle async read defaults to enabled for both Kudo read modes") {
+    Seq("CPU", "GPU").foreach { mode =>
+      val conf = new RapidsConf(Map(RapidsConf.SHUFFLE_KUDO_READ_MODE.key -> mode))
+      assert(CoalesceReadOption(conf).useAsync)
+      val disabled = new RapidsConf(Map(
+        RapidsConf.SHUFFLE_KUDO_READ_MODE.key -> mode,
+        RapidsConf.SHUFFLE_ASYNC_READ_ENABLED.key -> "false"))
+      assert(!CoalesceReadOption(disabled).useAsync)
+    }
+  }
+
   test("GpuMetric.ns: duplicate timing on the same metrics") {
     val m1 = new LocalGpuMetric()
     m1.ns(

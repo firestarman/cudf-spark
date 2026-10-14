@@ -69,3 +69,22 @@ spark.stop()
 
 For long-running applications or interactive sessions (spark-shell, notebooks), this is
 typically not an issue as there is enough time between queries for cleanup to complete.
+
+## Async shuffle read
+
+`spark.rapids.sql.asyncRead.shuffle.enabled` defaults to `true`. In Kudo GPU read mode,
+the next batch of serialized host input is buffered on a background thread. GPU transfer,
+deserialization, and merge remain on the task thread, using the GPU semaphore and existing
+OOM retry/split handling. Set the option to `false` at application startup to disable prefetch.
+
+With `spark.rapids.sql.metrics.level=DEBUG`, the SQL UI exposes `read batch time (async)`,
+`read batch semaphore time (async)`, and `background job launch time` on shuffle coalescing
+operators (with side prefixes on joins). The launch metric measures submission-to-start delay
+of consumed background jobs. A nonzero value confirms background work; a zero value can mean
+that the partition fit in one batch and no prefetch was needed. Read time is measured on the
+consumer thread; in Kudo GPU mode it also includes GPU merge. Semaphore time measures the
+portion spent holding the GPU semaphore, not the time waiting to acquire it.
+
+The background thread name starts with `async GPU shuffle buffer thread for `. Use a profiler
+to verify overlap with GPU merge or downstream kernels; timing metrics alone do not prove
+overlap or a performance improvement.

@@ -208,7 +208,7 @@ case class GpuShuffledHashJoinExec(
       DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME),
     CPU_BRIDGE_WAIT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
       DESCRIPTION_CPU_BRIDGE_WAIT_TIME)
-  ) ++ ShuffleCoalReadMetrics.createAsMap(this, isAsync = false, BUILD_PREFIX)
+  ) ++ ShuffleCoalReadMetrics.createAsMap(this, readOption.useAsync, BUILD_PREFIX)
 
   override def requiredChildDistribution: Seq[Distribution] =
     Seq(GpuHashPartitioning.getDistribution(cpuLeftKeys),
@@ -550,7 +550,8 @@ object GpuShuffledHashJoinExec extends Logging {
         case _: KudoSerializedTableColumn =>
           if (readOption.kudoMode == RapidsConf.ShuffleKudoMode.GPU) {
             val gpuIter = new KudoGpuShuffleCoalesceIterator(iter, targetSize, dataTypes,
-              concatTimeMetric = concatTime, readOption = readOption)
+              concatTimeMetric = concatTime, readOption = readOption,
+              bufferJobLaunchMetric = shuffleReadMetrics.bgJobLaunchMetric)
             retIter = Some((gpuIter, false)) // GPU batches
           } else {
             val hostIter = new KudoHostShuffleCoalesceIterator(iter, targetSize, dataTypes,

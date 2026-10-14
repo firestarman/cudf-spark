@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -48,7 +48,9 @@ class ThrottlingExecutorSuite extends AnyFunSuite with BeforeAndAfterEach {
 
   class TestTask extends Callable[Unit] {
     val latch = new CountDownLatch(1)
+    val started = new CountDownLatch(1)
     override def call(): Unit = {
+      started.countDown()
       latch.await()
     }
   }
@@ -138,6 +140,7 @@ class ThrottlingExecutorSuite extends AnyFunSuite with BeforeAndAfterEach {
   test("shutdown while a task is blocked") {
     val task1 = new TestTask
     val future1 = executor.submit(task1, 10)
+    assert(task1.started.await(longTimeoutSec, TimeUnit.SECONDS))
     assertResult(1)(trafficController.numScheduledTasks)
     assertResult(10)(throttle.getTotalHostMemoryBytes)
 
@@ -158,6 +161,50 @@ class ThrottlingExecutorSuite extends AnyFunSuite with BeforeAndAfterEach {
     assertCause(e1, classOf[InterruptedException])
     val e2 = intercept[ExecutionException](future2.get())
     assertCause(e2, classOf[RejectedExecutionException])
+  }
+
+  test("canceling a queued task returns its throttle reservation") {
+    val running = new TestTask
+    val first = executor.submit(running, 10)
+    assert(running.started.await(longTimeoutSec, TimeUnit.SECONDS))
+    val queued = executor.submit(new TestTask, 20)
+    assert(queued.cancel(false))
+    assertResult(1)(trafficController.numScheduledTasks)
+    assertResult(10)(throttle.getTotalHostMemoryBytes)
+    running.latch.countDown()
+    first.get(longTimeoutSec, TimeUnit.SECONDS)
+    assertResult(0)(trafficController.numScheduledTasks)
+  }
+
+  test("shutdown cancels queued tasks and returns all throttle reservations") {
+    val running = new TestTask
+    val first = executor.submit(running, 10)
+    assert(running.started.await(longTimeoutSec, TimeUnit.SECONDS))
+    val queued = executor.submit(new TestTask, 20)
+    executor.shutdownNow(longTimeoutSec, TimeUnit.SECONDS)
+    intercept[ExecutionException](first.get())
+    assert(queued.isCancelled)
+    assertResult(0)(trafficController.numScheduledTasks)
+    assertResult(0)(throttle.getTotalHostMemoryBytes)
+  }
+
+  test("a rejected submission returns its throttle reservation") {
+    executor.shutdownNow(longTimeoutSec, TimeUnit.SECONDS)
+    intercept[RejectedExecutionException](executor.submit(() => (), 10))
+    assertResult(0)(trafficController.numScheduledTasks)
+    assertResult(0)(throttle.getTotalHostMemoryBytes)
+  }
+
+  test("canceling a running task retains its reservation until it stops") {
+    val running = new TestTask
+    val first = executor.submit(running, 10)
+    assert(running.started.await(longTimeoutSec, TimeUnit.SECONDS))
+    assert(first.cancel(false))
+    assertResult(1)(trafficController.numScheduledTasks)
+    running.latch.countDown()
+    executor.submit(() => (), 1).get(longTimeoutSec, TimeUnit.SECONDS)
+    assertResult(0)(trafficController.numScheduledTasks)
+    assertResult(0)(throttle.getTotalHostMemoryBytes)
   }
 
   test("task metrics") {

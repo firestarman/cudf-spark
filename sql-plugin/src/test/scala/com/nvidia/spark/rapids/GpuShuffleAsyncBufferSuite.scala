@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids
 
-import java.util.concurrent.{CountDownLatch, ExecutionException, TimeUnit}
+import java.util.concurrent.{Callable, CountDownLatch, ExecutionException, FutureTask, TimeUnit}
 import java.util.concurrent.atomic.AtomicInteger
 
 import scala.collection.mutable.ArrayBuffer
@@ -29,6 +29,53 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class GpuShuffleAsyncBufferSuite extends AnyFunSuite {
+  private def onPrefetchThread[T](f: => T): T = {
+    val task = new FutureTask[T](new Callable[T] {
+      override def call(): T = f
+    })
+    val thread = new Thread(task)
+    thread.setDaemon(true)
+    thread.start()
+    try {
+      task.get(10, TimeUnit.SECONDS)
+    } finally {
+      task.cancel(true)
+      thread.join(TimeUnit.SECONDS.toMillis(10))
+    }
+  }
+
+  test("prefetched input batches count background reads before coalescing") {
+    val metric = new LocalGpuMetric
+    val batches = Seq.fill(4)(new ColumnarBatch(Array.empty, 1))
+    withResource(batches) { _ =>
+      val iter = new ShufflePrefetchMetricIterator(batches.iterator, metric)
+      assert(iter.hasNext)
+      assert(iter.next() eq batches.head)
+      assert(metric.value == 0)
+
+      onPrefetchThread {
+        assert(iter.hasNext)
+        assert(metric.value == 0)
+        assert(iter.next() eq batches(1))
+        assert(iter.next() eq batches(2))
+      }
+      assert(metric.value == 2)
+
+      assert(iter.next() eq batches(3))
+      assert(!iter.hasNext)
+      assert(metric.value == 2)
+    }
+  }
+
+  test("prefetched input batches do not count failed reads") {
+    val metric = new LocalGpuMetric
+    val iter = new ShufflePrefetchMetricIterator(Iterator.empty, metric)
+    onPrefetchThread {
+      intercept[NoSuchElementException](iter.next())
+    }
+    assert(metric.value == 0)
+  }
+
   private class TestTable(closedCount: AtomicInteger) extends AutoCloseable {
     override def close(): Unit = {
       closedCount.incrementAndGet()
@@ -79,7 +126,10 @@ class GpuShuffleAsyncBufferSuite extends AnyFunSuite {
     val buffered = new CountDownLatch(1)
     val closedCount = new AtomicInteger
     val launchMetric = new LocalGpuMetric
-    withResource(new TestIterator(Iterator.fill[ColumnarBatch](3)(null),
+    val prefetchedInputBatches = new LocalGpuMetric
+    val input = new ShufflePrefetchMetricIterator(
+      Iterator.fill[ColumnarBatch](3)(null), prefetchedInputBatches)
+    withResource(new TestIterator(input,
       true, closedCount, launchMetric,
       onBuffer = () => {
         if (Thread.currentThread() != consumer) buffered.countDown()
@@ -93,6 +143,7 @@ class GpuShuffleAsyncBufferSuite extends AnyFunSuite {
       }}
       assert(!iter.hasNext)
       assert(launchMetric.value > 0)
+      assert(prefetchedInputBatches.value == 2)
     }
     assert(closedCount.get() == 3)
   }
@@ -141,11 +192,15 @@ class GpuShuffleAsyncBufferSuite extends AnyFunSuite {
     val consumer = Thread.currentThread()
     val closedCount = new AtomicInteger
     val launchMetric = new LocalGpuMetric
-    withResource(new TestIterator(Iterator.fill[ColumnarBatch](1)(null),
+    val prefetchedInputBatches = new LocalGpuMetric
+    val input = new ShufflePrefetchMetricIterator(
+      Iterator.fill[ColumnarBatch](1)(null), prefetchedInputBatches)
+    withResource(new TestIterator(input,
       false, closedCount, launchMetric,
       onBuffer = () => assert(Thread.currentThread() == consumer))) { iter =>
       withResource(iter.next()) { _ => () }
       assert(launchMetric.value == 0)
+      assert(prefetchedInputBatches.value == 0)
     }
     assert(closedCount.get() == 1)
   }

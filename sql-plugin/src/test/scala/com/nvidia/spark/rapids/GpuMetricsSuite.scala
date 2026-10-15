@@ -121,21 +121,25 @@ class GpuMetricsSuite extends AnyFunSuite {
     val readTime = new LocalGpuMetric
     val semaphoreReadTime = new LocalGpuMetric
     val backgroundJobLaunchTime = new LocalGpuMetric
+    val prefetchedInputBatches = new LocalGpuMetric
     val metrics = Map[String, GpuMetric](
       "leftrapidsShuffleReadTime" -> readTime,
       "leftrapidsShuffleReadTimeWithSem" -> semaphoreReadTime,
-      "leftrapidsBGJobLaunchTime" -> backgroundJobLaunchTime)
+      "leftrapidsBGJobLaunchTime" -> backgroundJobLaunchTime,
+      "leftprefetchedInputBatches" -> prefetchedInputBatches)
 
     val resolved = ShuffleCoalReadMetrics(metrics, "left")
 
     assert(resolved.readTimeMetric eq readTime)
     assert(resolved.semReadTimeMetric eq semaphoreReadTime)
     assert(resolved.bgJobLaunchMetric eq backgroundJobLaunchTime)
+    assert(resolved.prefetchedInputBatchesMetric eq prefetchedInputBatches)
 
     val missing = ShuffleCoalReadMetrics(Map.empty)
     assert(missing.readTimeMetric eq NoopMetric)
     assert(missing.semReadTimeMetric eq NoopMetric)
     assert(missing.bgJobLaunchMetric eq NoopMetric)
+    assert(missing.prefetchedInputBatchesMetric eq NoopMetric)
   }
 
   test("shuffle coalesce read metrics filter unrelated metrics") {
@@ -146,6 +150,7 @@ class GpuMetricsSuite extends AnyFunSuite {
       "rightrapidsShuffleReadTime" -> readTime,
       "rightrapidsShuffleReadTimeWithSem" -> semaphoreReadTime,
       "rightrapidsBGJobLaunchTime" -> backgroundJobLaunchTime,
+      "rightprefetchedInputBatches" -> new LocalGpuMetric,
       GpuMetric.CONCAT_TIME -> new LocalGpuMetric)
 
     val filtered = ShuffleCoalReadMetrics.filter(metrics)
@@ -153,6 +158,7 @@ class GpuMetricsSuite extends AnyFunSuite {
     assert(filtered.keySet == Set(
       "rightrapidsShuffleReadTime",
       "rightrapidsShuffleReadTimeWithSem",
-      "rightrapidsBGJobLaunchTime"))
+      "rightrapidsBGJobLaunchTime",
+      "rightprefetchedInputBatches"))
   }
 }

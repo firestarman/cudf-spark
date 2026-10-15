@@ -140,15 +140,17 @@ object CoalesceReadOption extends Logging {
 class ShuffleCoalReadMetrics private(
     val readTimeMetric: GpuMetric,
     val semReadTimeMetric: GpuMetric,
-    val bgJobLaunchMetric: GpuMetric)
+    val bgJobLaunchMetric: GpuMetric,
+    val prefetchedInputBatchesMetric: GpuMetric)
 
 object ShuffleCoalReadMetrics {
   private val READ_TIME = "rapidsShuffleReadTime"
   private val SEMAPHORE_READ_TIME = "rapidsShuffleReadTimeWithSem"
   private val BACKGROUND_JOB_LAUNCH_TIME = "rapidsBGJobLaunchTime"
+  private val PREFETCHED_INPUT_BATCHES = "prefetchedInputBatches"
 
   private val metricNames =
-    Seq(READ_TIME, SEMAPHORE_READ_TIME, BACKGROUND_JOB_LAUNCH_TIME)
+    Seq(READ_TIME, SEMAPHORE_READ_TIME, BACKGROUND_JOB_LAUNCH_TIME, PREFETCHED_INPUT_BATCHES)
 
   def apply(
       metrics: Map[String, GpuMetric],
@@ -158,7 +160,8 @@ object ShuffleCoalReadMetrics {
     new ShuffleCoalReadMetrics(
       getOrNoop(READ_TIME),
       getOrNoop(SEMAPHORE_READ_TIME),
-      getOrNoop(BACKGROUND_JOB_LAUNCH_TIME))
+      getOrNoop(BACKGROUND_JOB_LAUNCH_TIME),
+      getOrNoop(PREFETCHED_INPUT_BATCHES))
   }
 
   /**
@@ -178,13 +181,37 @@ object ShuffleCoalReadMetrics {
     Map(
       entry(READ_TIME, s"read batch time ($mode)"),
       entry(SEMAPHORE_READ_TIME, s"read batch semaphore time ($mode)"),
-      entry(BACKGROUND_JOB_LAUNCH_TIME, "background job launch time"))
+      entry(BACKGROUND_JOB_LAUNCH_TIME, "background job launch time"),
+      s"$prefix$PREFETCHED_INPUT_BATCHES" -> exec.createMetric(
+        GpuMetric.MODERATE_LEVEL, s"$prefix prefetched input batches".trim))
   }
 
   def filter(metrics: Map[String, GpuMetric]): Map[String, GpuMetric] = {
     metrics.filter { case (key, _) =>
       metricNames.exists(metricName => key.contains(metricName))
     }
+  }
+}
+
+/**
+ * Counts input batches successfully read by shuffle prefetch workers before coalescing.
+ * The iterator is created on the consumer task thread; synchronous reads on that thread do not
+ * count. Checking at the input boundary covers both the host coalesce worker and buffer workers,
+ * without counting a batch twice when it passes through multiple async stages.
+ */
+private[rapids] class ShufflePrefetchMetricIterator(
+    iter: Iterator[ColumnarBatch],
+    prefetchedInputBatchesMetric: GpuMetric) extends Iterator[ColumnarBatch] {
+  private val consumerThread = Thread.currentThread()
+
+  override def hasNext: Boolean = iter.hasNext
+
+  override def next(): ColumnarBatch = {
+    val batch = iter.next()
+    if (Thread.currentThread() ne consumerThread) {
+      prefetchedInputBatchesMetric += 1
+    }
+    batch
   }
 }
 
@@ -271,6 +298,11 @@ object GpuShuffleCoalesceUtils {
     val opTimeMetric = metricsMap(GpuMetric.OP_TIME_LEGACY)
     val readThrottlingMetric = metricsMap(GpuMetric.READ_THROTTLING_TIME)
     val shuffleReadMetrics = ShuffleCoalReadMetrics(metricsMap, prefix)
+    val inputIter = if (readOption.useAsync) {
+      new ShufflePrefetchMetricIterator(iter, shuffleReadMetrics.prefetchedInputBatchesMetric)
+    } else {
+      iter
+    }
     val legacyReadTimeMetric = if (readOption.useAsync) {
       metricsMap(ASYNC_READ_TIME)
     } else {
@@ -278,16 +310,16 @@ object GpuShuffleCoalesceUtils {
     }
     val hostIter: Iterator[_ <: AutoCloseable] = if (readOption.kudoEnabled) {
       if (readOption.kudoMode == RapidsConf.ShuffleKudoMode.GPU) {
-        new KudoGpuShuffleCoalesceIterator(iter, targetSize, dataTypes, concatTimeMetric,
+        new KudoGpuShuffleCoalesceIterator(inputIter, targetSize, dataTypes, concatTimeMetric,
           inBatchesMetric, inRowsMetric, readThrottlingMetric, readOption, minSplitSize,
           shuffleReadMetrics.bgJobLaunchMetric)
       } else {
-        new KudoHostShuffleCoalesceIterator(iter, targetSize, dataTypes, concatTimeMetric,
+        new KudoHostShuffleCoalesceIterator(inputIter, targetSize, dataTypes, concatTimeMetric,
           inBatchesMetric, inRowsMetric, readThrottlingMetric, readOption, minSplitSize,
           shuffleReadMetrics.bgJobLaunchMetric)
       }
     } else {
-      new HostShuffleCoalesceIterator(iter, targetSize, concatTimeMetric, inBatchesMetric,
+      new HostShuffleCoalesceIterator(inputIter, targetSize, concatTimeMetric, inBatchesMetric,
         inRowsMetric, readThrottlingMetric,
         shuffleReadMetrics.bgJobLaunchMetric)
     }

@@ -16,9 +16,13 @@
 
 package com.nvidia.spark.rapids
 
-import java.util.concurrent.{Callable, Future, TimeUnit}
+import java.util
+import java.util.concurrent.{Callable, ConcurrentLinkedQueue, Future, TimeUnit}
+
+import scala.util.control.NonFatal
 
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 import com.nvidia.spark.rapids.io.async.{ThrottlingExecutor, TrafficController}
 
@@ -45,7 +49,12 @@ class GpuShuffleAsyncCoalesceIterator(iter: Iterator[CoalescedHostResult],
     readTimeMetric: GpuMetric = NoopMetric,
     semReadTimeMetric: GpuMetric = NoopMetric,
     bgJobLaunchTimeMetric: GpuMetric = NoopMetric,
-) extends Iterator[ColumnarBatch] {
+    prefetchBatches: Int = 1,
+    prefetchWaitTimeMetric: GpuMetric = NoopMetric,
+    prefetchWaitCountMetric: GpuMetric = NoopMetric
+) extends Iterator[ColumnarBatch] with AutoCloseable {
+
+  require(prefetchBatches > 0, "Shuffle prefetch batch count must be positive")
 
   // Don't install the callback if in a unit test
   Option(TaskContext.get()).foreach { tc =>
@@ -62,26 +71,73 @@ class GpuShuffleAsyncCoalesceIterator(iter: Iterator[CoalescedHostResult],
       }
     )
 
-  def close(): Unit = {
-    executor.shutdownNow(10, TimeUnit.SECONDS)
-  }
-
-  private type ReadResult = (CoalescedHostResult, Long)
-
-  private class ReadCallable extends Callable[ReadResult] {
-    private val submittedAt = System.nanoTime()
-
-    // The actual async read, including the host batches read and concatenation in
-    // "HostCoalesceIteratorBase.next()".
-    override def call(): ReadResult = {
-      val launchTime = System.nanoTime() - submittedAt
-      NvtxRegistry.ASYNC_SHUFFLE_READ {
-        (iter.next(), launchTime)
+  override def close(): Unit = {
+    closed = true
+    try {
+      executor.shutdownNow(10, TimeUnit.SECONDS)
+    } finally {
+      readLock.synchronized {
+        val results = new scala.collection.mutable.ArrayBuffer[AutoCloseable]()
+        var result = prefetchedResults.poll()
+        while (result != null) {
+          results += result.batch
+          result = prefetchedResults.poll()
+        }
+        readFutures.clear()
+        results.safeClose()
       }
     }
   }
 
-  private var readFutureOpt: Option[Future[ReadResult]] = None
+  // Identity-based ownership avoids confusing distinct but equal rows-only results during close.
+  private class ReadResult(val batch: CoalescedHostResult, val launchTime: Long)
+
+  private val readFutures = new util.ArrayDeque[Future[Option[ReadResult]]]
+  private val prefetchedResults = new ConcurrentLinkedQueue[ReadResult]
+  private val readLock = new Object
+  @volatile private var closed = false
+  @volatile private var inputExhausted = false
+  private var prefetchStarted = false
+
+  private class ReadCallable extends Callable[Option[ReadResult]] {
+    private val submittedAt = System.nanoTime()
+
+    // The actual async read, including the host batches read and concatenation in
+    // "HostCoalesceIteratorBase.next()".
+    override def call(): Option[ReadResult] = readLock.synchronized {
+      val launchTime = System.nanoTime() - submittedAt
+      if (closed || inputExhausted) {
+        None
+      } else try {
+        NvtxRegistry.ASYNC_SHUFFLE_READ {
+          if (iter.hasNext) {
+            val batch = iter.next()
+            closeOnExcept(batch) { _ =>
+              val result = new ReadResult(batch, launchTime)
+              prefetchedResults.add(result)
+              Some(result)
+            }
+          } else {
+            inputExhausted = true
+            None
+          }
+        }
+      } catch {
+        case NonFatal(e) =>
+          inputExhausted = true
+          throw e
+      }
+    }
+  }
+
+  private def fillPrefetchQueue(): Unit = {
+    prefetchStarted = true
+    while (readFutures.size() < prefetchBatches && !inputExhausted && !closed) {
+      // Reserve an estimate for each host coalesce job. The inner input buffering executor
+      // separately accounts for its single input prefetch, as in the original two-stage pipeline.
+      readFutures.addLast(executor.submitWithDeferredReservation(new ReadCallable, targetBatchSize))
+    }
+  }
 
   private def withReadMetrics[R](f: => R): R = opTimeMetric.ns {
     asyncReadTimeMetric.ns {
@@ -91,11 +147,16 @@ class GpuShuffleAsyncCoalesceIterator(iter: Iterator[CoalescedHostResult],
     }
   }
 
-  override def hasNext: Boolean = readFutureOpt.isDefined || {
-    // No async read is running when it comes here, so no need synchronization
-    // when accessing the input iterator. "iter.hasNext" should be lightweight
-    // enough, since it just read in a header which is very small.
-    withReadMetrics(iter.hasNext)
+  override def hasNext: Boolean = !closed && withReadMetrics {
+    if (prefetchStarted) {
+      while (!readFutures.isEmpty && ShufflePrefetchWaitMetrics.await(
+          readFutures.peekFirst(), prefetchWaitTimeMetric, prefetchWaitCountMetric).isEmpty) {
+        readFutures.removeFirst()
+      }
+      !readFutures.isEmpty
+    } else {
+      iter.hasNext
+    }
   }
 
   override def next(): ColumnarBatch = {
@@ -104,12 +165,13 @@ class GpuShuffleAsyncCoalesceIterator(iter: Iterator[CoalescedHostResult],
     }
     NvtxRegistry.ASYNC_SHUFFLE_READ {
       val hostConcatedRet = withReadMetrics {
-        readFutureOpt.map { readFuture =>
-          // An async read is running, waiting for the result
-          val (result, launchTime) = readFuture.get()
-          bgJobLaunchTimeMetric.add(launchTime)
-          result
-        }.getOrElse { // The first batch, just read it directly
+        if (!readFutures.isEmpty) {
+          val result = ShufflePrefetchWaitMetrics.await(
+            readFutures.removeFirst(), prefetchWaitTimeMetric, prefetchWaitCountMetric).get
+          prefetchedResults.remove(result)
+          bgJobLaunchTimeMetric.add(result.launchTime)
+          result.batch
+        } else { // The first batch, just read it directly
           iter.next()
         }
       }
@@ -121,23 +183,9 @@ class GpuShuffleAsyncCoalesceIterator(iter: Iterator[CoalescedHostResult],
         GpuMetric.ns(opTimeMetric)(hostConcatedRet.toGpuBatch(dataTypes))
       }
       closeOnExcept(gpuCB) { _ =>
-        val hasNextCB = withReadMetrics(iter.hasNext)
         GpuMetric.ns(opTimeMetric) {
-          // No need synchronization here since the async read is already done.
-          if (hasNextCB) {
-            // Prefetch and concatenate the next one asynchronously.
-            readFutureOpt = Some(executor.submit(
-              new ReadCallable,
-              // This is just a estimation, may overestimate.
-              // Why not targetBatchSize * 2 (1 targetBatchSize for prefetch and 1 targetBatchSize
-              // for concatenate) ? Because this executor actually only accounts for
-              // concatenate step, the overhead of prefetch itself will be accounted by
-              // HostCoalesceIteratorBase.executor
-              targetBatchSize
-            ))
-          } else {
-            readFutureOpt = None
-          }
+          // Only the single background reader touches iter after prefetch starts.
+          fillPrefetchQueue()
           outputBatchesMetric += 1
           outputRowsMetric += gpuCB.numRows()
           gpuCB

@@ -135,7 +135,8 @@ object GpuKudoWritePartitioningSuite {
       kudoMode = ShuffleKudoMode.GPU,
       kudoDebugMode = DumpOption.Never,
       kudoDebugDumpPrefix = None,
-      useAsync = false
+      useAsync = false,
+      prefetchBatches = 1
     )
 
     // Use the coalesce iterator to fully deserialize the batches

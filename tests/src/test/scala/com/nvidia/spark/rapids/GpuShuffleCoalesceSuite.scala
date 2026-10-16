@@ -168,13 +168,14 @@ class GpuShuffleCoalesceSuite extends AnyFunSuite with BeforeAndAfterEach {
     )
   }
 
-  private def createReadOption(useAsync: Boolean): CoalesceReadOption = {
+  private def createReadOption(useAsync: Boolean, prefetchBatches: Int): CoalesceReadOption = {
     CoalesceReadOption(
       kudoEnabled = true,
       kudoMode = RapidsConf.ShuffleKudoMode.GPU,
       kudoDebugMode = DumpOption.Never,
       kudoDebugDumpPrefix = None,
-      useAsync = useAsync
+      useAsync = useAsync,
+      prefetchBatches = prefetchBatches
     )
   }
 
@@ -199,7 +200,8 @@ class GpuShuffleCoalesceSuite extends AnyFunSuite with BeforeAndAfterEach {
       minSplitSize: Option[Long] = None,
       forceSplitRetry: Boolean = false,
       useAsync: Boolean = false,
-      expectPrefetch: Boolean = false): Unit = {
+      expectPrefetch: Boolean = false,
+      prefetchBatches: Int = 1): Unit = {
     TrampolineUtil.cleanupAnyExistingSession()
     val conf = createSparkConf()
     TestUtils.withGpuSparkSession(conf) { _ =>
@@ -229,7 +231,7 @@ class GpuShuffleCoalesceSuite extends AnyFunSuite with BeforeAndAfterEach {
 
           // Set up metrics and read options
           val metricsMap = createMetricsMap()
-          val readOption = createReadOption(useAsync)
+          val readOption = createReadOption(useAsync, prefetchBatches)
 
           // Get the coalescing iterator
           val coalesceIter = minSplitSize match {
@@ -287,21 +289,28 @@ class GpuShuffleCoalesceSuite extends AnyFunSuite with BeforeAndAfterEach {
       forceSplitRetry = true)
   }
 
-  test("GPU kudo asynchronously prefetches serialized input") {
-    runKudoShuffleTest(targetBatchSize = 1, useAsync = true, expectPrefetch = true)
+  Seq(1, 2, 4).foreach { depth =>
+    test(s"GPU kudo asynchronously prefetches serialized input at depth $depth") {
+      runKudoShuffleTest(targetBatchSize = 1, useAsync = true, expectPrefetch = true,
+        prefetchBatches = depth)
+    }
+
+    test(s"GPU kudo async read retains split retry at depth $depth") {
+      runKudoShuffleTest(targetBatchSize = 100000, minSplitSize = Some(1L),
+        forceSplitRetry = true, useAsync = true, prefetchBatches = depth)
+    }
   }
 
-  test("GPU kudo async read retains split retry") {
-    runKudoShuffleTest(targetBatchSize = 100000, minSplitSize = Some(1L),
-      forceSplitRetry = true, useAsync = true)
-  }
-
-  Seq(("GPU", true), ("CPU", true), ("GPU", false)).foreach { case (mode, useKudo) =>
-    test(s"shuffle defaults to async read in a Spark task: mode=$mode, kudo=$useKudo") {
+  for {
+    (mode, useKudo) <- Seq(("GPU", true), ("CPU", true), ("GPU", false))
+    depth <- Seq(1, 2, 4)
+  } {
+    test(s"shuffle async read in a Spark task: mode=$mode, kudo=$useKudo, depth=$depth") {
       val conf = createSparkConf()
         .set(RapidsConf.SHUFFLE_KUDO_WRITE_MODE.key, "CPU")
         .set(RapidsConf.SHUFFLE_KUDO_READ_MODE.key, mode)
         .set(RapidsConf.SHUFFLE_KUDO_SERIALIZER_ENABLED.key, useKudo.toString)
+        .set(RapidsConf.SHUFFLE_ASYNC_PREFETCH_BATCHES.key, depth.toString)
         .set("spark.shuffle.manager", GpuShuffleEnv.RAPIDS_SHUFFLE_CLASS)
         .set(RapidsConf.SHUFFLE_MANAGER_MODE.key, "MULTITHREADED")
         .set(RapidsConf.GPU_BATCH_SIZE_BYTES.key, "4096")
@@ -317,6 +326,11 @@ class GpuShuffleCoalesceSuite extends AnyFunSuite with BeforeAndAfterEach {
         assert(readers.nonEmpty, "Query must exercise GPU shuffle coalescing")
         assert(readers.exists(_.allMetrics("rapidsBGJobLaunchTime").value > 0),
           "Default shuffle must execute a background prefetch")
+        assert(readers.exists(_.allMetrics("prefetchedInputBatches").value > 0))
+        readers.foreach { reader =>
+          assert(reader.allMetrics.contains("prefetchWaitTime"))
+          assert(reader.allMetrics.contains("prefetchWaitCount"))
+        }
       }
     }
   }

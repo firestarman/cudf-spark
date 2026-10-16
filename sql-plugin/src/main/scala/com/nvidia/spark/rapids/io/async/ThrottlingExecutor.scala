@@ -122,6 +122,25 @@ class ThrottlingExecutor(executor: ExecutorService, throttler: TrafficController
     }
   }
 
+  /**
+   * Queue work without reserving memory until its worker starts. This allows a host coalesce
+   * worker to schedule its nested input prefetch without queued coalesce jobs holding the budget.
+   */
+  def submitWithDeferredReservation[T](
+      callable: Callable[T], hostMemoryBytes: Long): Future[T] = {
+    val task = new Task[T](hostMemoryBytes, callable)
+    executor.submit(new Callable[T] {
+      override def call(): T = {
+        blockUntilTaskRunnable(task)
+        try {
+          task.call()
+        } finally {
+          throttler.taskCompleted(task)
+        }
+      }
+    })
+  }
+
   def shutdownNow(timeout: Long, timeUnit: TimeUnit): Unit = {
     updateStats(stats)
     executor.shutdownNow().asScala.foreach {

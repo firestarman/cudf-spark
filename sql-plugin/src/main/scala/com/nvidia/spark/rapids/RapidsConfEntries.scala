@@ -474,6 +474,20 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .booleanConf
     .createWithDefault(true)
 
+  val SHUFFLE_ASYNC_PREFETCH_BATCHES =
+    conf("spark.rapids.sql.asyncRead.shuffle.prefetchBatches")
+      .doc("Maximum number of batches prefetched ahead per asynchronous shuffle reader. " +
+        "In Kudo GPU read mode this counts serialized host input groups collected up to " +
+        "spark.rapids.sql.batchSizeBytes. In host read modes this counts host-coalesced " +
+        "results; the existing inner input prefetch may buffer one additional input group. " +
+        "This does not count individual incoming shuffle batches. " +
+        "Larger values can increase host memory usage.")
+      .internal()
+      .startupOnly()
+      .integerConf
+      .checkValue(_ > 0, "Shuffle prefetch batch count must be positive")
+      .createWithDefault(1)
+
   // ["NEVER", "ALWAYS", "ONFAILURE"]
   private val KudoDebugModes =
     DumpOption.values.map(_.toString.toUpperCase(java.util.Locale.ROOT)).toSet

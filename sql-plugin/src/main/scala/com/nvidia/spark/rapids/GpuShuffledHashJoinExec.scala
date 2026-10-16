@@ -551,7 +551,9 @@ object GpuShuffledHashJoinExec extends Logging {
           if (readOption.kudoMode == RapidsConf.ShuffleKudoMode.GPU) {
             val gpuIter = new KudoGpuShuffleCoalesceIterator(iter, targetSize, dataTypes,
               concatTimeMetric = concatTime, readOption = readOption,
-              bufferJobLaunchMetric = shuffleReadMetrics.bgJobLaunchMetric)
+              bufferJobLaunchMetric = shuffleReadMetrics.bgJobLaunchMetric,
+              prefetchWaitTimeMetric = shuffleReadMetrics.prefetchWaitTimeMetric,
+              prefetchWaitCountMetric = shuffleReadMetrics.prefetchWaitCountMetric)
             retIter = Some((gpuIter, false)) // GPU batches
           } else {
             val hostIter = new KudoHostShuffleCoalesceIterator(iter, targetSize, dataTypes,

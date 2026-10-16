@@ -1235,6 +1235,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val shuffleAsyncReadEnabled: Boolean = get(SHUFFLE_ASYNC_READ_ENABLED)
 
+  lazy val shuffleAsyncPrefetchBatches: Int = get(SHUFFLE_ASYNC_PREFETCH_BATCHES)
+
   lazy val shuffleKudoSerializerDebugMode: DumpOption = {
     val mode = get(SHUFFLE_KUDO_SERIALIZER_DEBUG_MODE)
     mode match {

@@ -19,8 +19,23 @@ package com.nvidia.spark.rapids
 import com.nvidia.spark.rapids.Arm.withResource
 import org.scalatest.funsuite.AnyFunSuite
 
-class GpuMetricsSuite extends AnyFunSuite {
+import org.apache.spark.sql.internal.SQLConf
 
+class GpuMetricsSuite extends AnyFunSuite {
+  test("shuffle prefetch depth defaults to one and validates positive values") {
+    assert(CoalesceReadOption(new RapidsConf(Map.empty[String, String])).prefetchBatches == 1)
+    val key = RapidsConf.SHUFFLE_ASYNC_PREFETCH_BATCHES.key
+    assert(CoalesceReadOption(new RapidsConf(Map(key -> "2"))).prefetchBatches == 2)
+    val sqlConf = new SQLConf
+    assert(CoalesceReadOption(sqlConf).prefetchBatches == 1)
+    sqlConf.setConfString(key, "3")
+    assert(CoalesceReadOption(sqlConf).prefetchBatches == 3)
+    Seq("0", "-1").foreach { value =>
+      intercept[IllegalArgumentException] {
+        CoalesceReadOption(new RapidsConf(Map(key -> value)))
+      }
+    }
+  }
   test("shuffle read timing without a task does not access the GPU semaphore") {
     val wallTime = new LocalGpuMetric
     val semaphoreTime = new LocalGpuMetric
@@ -122,11 +137,15 @@ class GpuMetricsSuite extends AnyFunSuite {
     val semaphoreReadTime = new LocalGpuMetric
     val backgroundJobLaunchTime = new LocalGpuMetric
     val prefetchedInputBatches = new LocalGpuMetric
+    val prefetchWaitTime = new LocalGpuMetric
+    val prefetchWaitCount = new LocalGpuMetric
     val metrics = Map[String, GpuMetric](
       "leftrapidsShuffleReadTime" -> readTime,
       "leftrapidsShuffleReadTimeWithSem" -> semaphoreReadTime,
       "leftrapidsBGJobLaunchTime" -> backgroundJobLaunchTime,
-      "leftprefetchedInputBatches" -> prefetchedInputBatches)
+      "leftprefetchedInputBatches" -> prefetchedInputBatches,
+      "leftprefetchWaitTime" -> prefetchWaitTime,
+      "leftprefetchWaitCount" -> prefetchWaitCount)
 
     val resolved = ShuffleCoalReadMetrics(metrics, "left")
 
@@ -134,12 +153,16 @@ class GpuMetricsSuite extends AnyFunSuite {
     assert(resolved.semReadTimeMetric eq semaphoreReadTime)
     assert(resolved.bgJobLaunchMetric eq backgroundJobLaunchTime)
     assert(resolved.prefetchedInputBatchesMetric eq prefetchedInputBatches)
+    assert(resolved.prefetchWaitTimeMetric eq prefetchWaitTime)
+    assert(resolved.prefetchWaitCountMetric eq prefetchWaitCount)
 
     val missing = ShuffleCoalReadMetrics(Map.empty)
     assert(missing.readTimeMetric eq NoopMetric)
     assert(missing.semReadTimeMetric eq NoopMetric)
     assert(missing.bgJobLaunchMetric eq NoopMetric)
     assert(missing.prefetchedInputBatchesMetric eq NoopMetric)
+    assert(missing.prefetchWaitTimeMetric eq NoopMetric)
+    assert(missing.prefetchWaitCountMetric eq NoopMetric)
   }
 
   test("shuffle coalesce read metrics filter unrelated metrics") {
@@ -151,6 +174,8 @@ class GpuMetricsSuite extends AnyFunSuite {
       "rightrapidsShuffleReadTimeWithSem" -> semaphoreReadTime,
       "rightrapidsBGJobLaunchTime" -> backgroundJobLaunchTime,
       "rightprefetchedInputBatches" -> new LocalGpuMetric,
+      "rightprefetchWaitTime" -> new LocalGpuMetric,
+      "rightprefetchWaitCount" -> new LocalGpuMetric,
       GpuMetric.CONCAT_TIME -> new LocalGpuMetric)
 
     val filtered = ShuffleCoalReadMetrics.filter(metrics)
@@ -159,6 +184,8 @@ class GpuMetricsSuite extends AnyFunSuite {
       "rightrapidsShuffleReadTime",
       "rightrapidsShuffleReadTimeWithSem",
       "rightrapidsBGJobLaunchTime",
-      "rightprefetchedInputBatches"))
+      "rightprefetchedInputBatches",
+      "rightprefetchWaitTime",
+      "rightprefetchWaitCount"))
   }
 }

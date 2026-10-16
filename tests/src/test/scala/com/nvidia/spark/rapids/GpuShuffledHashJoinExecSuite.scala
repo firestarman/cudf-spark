@@ -20,7 +20,6 @@ import java.io.{ByteArrayInputStream, ByteArrayOutputStream, DataInputStream}
 
 import ai.rapids.cudf.{ColumnVector, HostMemoryBuffer, JCudfSerialization, Table}
 import com.nvidia.spark.rapids.Arm._
-import org.mockito.ArgumentMatchers._
 import org.mockito.Mockito._
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatestplus.mockito.MockitoSugar
@@ -32,8 +31,7 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /** Tests for the "prepareBuildBatchesForJoin" function. */
 class GpuShuffledHashJoinExecSuite extends AnyFunSuite with MockitoSugar {
-  private val metricMap = mock[Map[String, GpuMetric]]
-  when(metricMap(any())).thenReturn(NoopMetric)
+  private val metricMap = Map.empty[String, GpuMetric].withDefaultValue(NoopMetric)
 
   // The test table size is 20 (= 4 * 5) bytes
   private val TARGET_SIZE_SMALL = 10L

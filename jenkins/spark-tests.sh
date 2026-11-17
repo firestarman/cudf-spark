@@ -284,9 +284,8 @@ run_delta_lake_tests() {
   SPARK_34X_PATTERN="(3\.4\.[0-9]+)"
   SPARK_35X_PATTERN="(3\.5\.([3-9]|[1-9][0-9]+))"
   SPARK_40X_PATTERN="(4\.0\.[0-9]+)"
-  # Delta 4.1.0 is binary-incompatible with Spark 4.1.2+ after Spark changed internal
-  # Catalyst and Parquet APIs. Keep coverage on the compatible Spark patch releases.
-  SPARK_41_0_1_PATTERN="^(4\.1\.[0-1])$"
+  # Keep older unsupported patch releases excluded while exercising the 414 adapters.
+  SPARK_41X_PATTERN="^(4\.1\.([0-1]|4))$"
 
   if [[ $SPARK_VER =~ $SPARK_32X_PATTERN ]]; then
     # There are multiple versions of deltalake that support SPARK 3.2.X
@@ -328,7 +327,7 @@ run_delta_lake_tests() {
       else
         DELTA_LAKE_VERSIONS="4.0.1"
       fi
-      if [[ "$SPARK_VER" == "4.0.1" ]]; then
+      if [[ "$SPARK_VER" == "4.0.1" || "$SPARK_VER" == "4.0.5" ]]; then
         DELTA_LAKE_VERSIONS="$DELTA_LAKE_VERSIONS 4.2.0 4.3.0"
       fi
     else
@@ -336,11 +335,11 @@ run_delta_lake_tests() {
     fi
   fi
 
-  if [[ $SPARK_VER =~ $SPARK_41_0_1_PATTERN ]]; then
+  if [[ $SPARK_VER =~ $SPARK_41X_PATTERN ]]; then
     # Delta 4.1.x only supports Scala 2.13 (Spark 4.1 requirement)
     if [[ "$SCALA_BINARY_VER" == "2.13" ]]; then
       DELTA_LAKE_VERSIONS="4.1.0"
-      if [[ "$SPARK_VER" == "4.1.1" ]]; then
+      if [[ "$SPARK_VER" == "4.1.1" || "$SPARK_VER" == "4.1.4" ]]; then
         DELTA_LAKE_VERSIONS="$DELTA_LAKE_VERSIONS 4.2.0 4.3.0"
       fi
     else
@@ -402,11 +401,10 @@ run_delta_lake_uc_tests() {
     test_parallel=1
   fi
 
-  # These conditions mirror the Delta Lake 4.2.0 and 4.3.0 rows of run_delta_lake_tests above:
-  # those versions are only exercised on Scala 2.13 with Spark 4.0.1 or 4.1.1. They are repeated
-  # rather than read from DELTA_LAKE_VERSIONS because that variable is assigned inside
-  # run_delta_lake_tests, which TEST_MODE=DELTA_LAKE_UC_ONLY never runs. run_unity_catalog_server.sh
-  # rejects the same combinations outright; CI skips them instead.
+  # Unity Catalog coverage remains limited to Scala 2.13 with Spark 4.0.1 or 4.1.1.
+  # General Delta coverage on 4.0.5 and 4.1.4 does not enable these separate server tests.
+  # TEST_MODE=DELTA_LAKE_UC_ONLY never calls run_delta_lake_tests, so validate here too.
+  # run_unity_catalog_server.sh rejects the same combinations outright; CI skips them instead.
   if [[ "$SCALA_BINARY_VER" != "2.13" ]]; then
     if [[ "$TEST_MODE" == "DELTA_LAKE_UC_ONLY" ]]; then
       echo "!!!! Unity Catalog tests require Scala 2.13, found $SCALA_BINARY_VER"

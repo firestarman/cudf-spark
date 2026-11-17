@@ -18,9 +18,9 @@ and directory contains the corresponding support code.
 | 2.4.x              | Spark 3.4.x     | `delta-24x`        |
 | 3.3.x              | Spark 3.5.[3-]  | `delta-33x`        |
 | 4.0.x              | Spark 4.0.x     | `delta-40x`        |
-| 4.1.0              | Spark 4.1.0, 4.1.1 | `delta-41x`     |
-| 4.2.0              | Spark 4.0.1, 4.1.1 | `delta-42x`     |
-| 4.3.0              | Spark 4.0.1, 4.1.1 | `delta-43x`     |
+| 4.1.0              | Spark 4.1.0, 4.1.1, 4.1.4 | `delta-41x` |
+| 4.2.0              | Spark 4.0.1, 4.0.5, 4.1.1, 4.1.4 | `delta-42x` |
+| 4.3.0              | Spark 4.0.1, 4.0.5, 4.1.1, 4.1.4 | `delta-43x` |
 | Databricks 14.3    | Databricks 14.3 | `delta-spark350db143` |
 | Databricks 17.3    | Databricks 17.3 | `delta-spark400db173` |
 | Databricks 18.3 | Databricks 18.3 | `delta-spark410db183` |
@@ -28,9 +28,14 @@ and directory contains the corresponding support code.
 Delta Lake is not supported on all Spark versions, and for Spark versions where it is not
 supported the `delta-stub` project is used.
 
-The Delta Lake 4.1.0 restriction to Spark 4.1.0 and 4.1.1 is caused by an upstream binary
-incompatibility in open source Delta Lake with Spark 4.1.2 and later, not by the NVIDIA cuDF
-plugin for Apache Spark.
+The Spark 4.1.4 Delta modules include the `IgnoreCachedData` compatibility marker retained
+by Delta commands but removed from Spark. Spark 4.1.2 and 4.1.3 remain outside the enabled
+Delta integration-test matrix.
+
+Spark 4.0.5 builds package the `delta-40x`, `delta-42x`, and `delta-43x` modules; Spark 4.1.4
+builds package `delta-41x`, `delta-42x`, and `delta-43x`. The runtime selects the adapter for
+the installed Delta version. Delta 4.2.0 and 4.3.0 dependencies use the Spark-specific
+`delta-spark_4.0_2.13` or `delta-spark_4.1_2.13` artifact matching the Spark runtime.
 
 ## Code Shared Between Modules
 

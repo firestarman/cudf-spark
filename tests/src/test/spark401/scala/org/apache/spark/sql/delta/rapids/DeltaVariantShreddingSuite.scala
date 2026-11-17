@@ -15,7 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark":["401","411"],"carryForward":"none"}
+{"spark":["401","405","411","414"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.delta.rapids
 

@@ -15,7 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark":["401","402","411"],"carryForward":"none"}
+{"spark":["401","402","405","411","414"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.delta.rapids
 
@@ -25,6 +25,7 @@ import com.nvidia.spark.rapids.{RapidsConf, SparkQueryCompareTestSuite}
 import com.nvidia.spark.rapids.delta.{DeltaProvider, NoDeltaProvider}
 import org.scalatestplus.mockito.MockitoSugar.mock
 
+import org.apache.spark.SparkConf
 import org.apache.spark.sql.{Dataset, Row, SaveMode}
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Literal}
 import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
@@ -50,7 +51,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   }
 
   test("Delta 4.2 runtime shim selection covers supported Spark versions") {
-    Seq("4.0.1", "4.1.1").foreach { sparkVersion =>
+    Seq("4.0.1", "4.0.5", "4.1.1", "4.1.4").foreach { sparkVersion =>
       val shimClassName = DeltaRuntimeShim.getDelta42ShimClassName("4.2.0", sparkVersion)
       assert(shimClassName.exists(_.contains("delta42x")))
     }
@@ -73,7 +74,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   }
 
   test("Delta 4.3 runtime shim selection covers supported Spark versions") {
-    Seq("4.0.1", "4.1.1").foreach { sparkVersion =>
+    Seq("4.0.1", "4.0.5", "4.1.1", "4.1.4").foreach { sparkVersion =>
       val shimClassName = DeltaRuntimeShim.getDelta43ShimClassName("4.3.0", sparkVersion)
       assert(shimClassName.exists(_.contains("delta43x")))
     }
@@ -172,7 +173,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
     val parquetOutputTimestampType = "spark.sql.parquet.outputTimestampType"
     val parquetWriterVersion = "parquet.writer.version"
 
-    withGpuSparkSession { spark =>
+    withGpuSparkSession({ spark =>
       withTempPath { tablePath =>
         val gpuDeltaLog = GpuDeltaLog.forTable(
           spark,
@@ -210,6 +211,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
         assert(encodeVariantStatsIfNeeded.invoke(txn, variantSchema, statsCollector)
           .getClass.getSimpleName == "EncodeNestedVariantAsZ85String")
       }
-    }
+    }, new SparkConf().set(
+      "spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog"))
   }
 }
